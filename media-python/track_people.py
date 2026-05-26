@@ -10,6 +10,7 @@ def parse_args():
     parser.add_argument("--model", default=MODEL_PATH, help="Path to the MediaPipe pose model.")
     parser.add_argument("--udp-host", default=UDP_HOST, help="UDP host to send packets to.")
     parser.add_argument("--udp-port", type=int, default=UDP_PORT, help="UDP port to send packets to.")
+    parser.add_argument("--mirror", action="store_true", help="Mirror the live preview only. UDP data remains unmirrored.")
     return parser.parse_args()
 
 
@@ -20,6 +21,7 @@ def main():
         model_path=args.model,
         udp_host=args.udp_host,
         udp_port=args.udp_port,
+        mirror=args.mirror,
         window_title="MediaPipe Tracker",
     )
 

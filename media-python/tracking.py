@@ -70,6 +70,32 @@ def build_packet(result, width, height, timestamp_ms):
     return packet
 
 
+def mirror_packet(packet):
+    mirrored_packet = {
+        "timestamp_ms": packet["timestamp_ms"],
+        "frame": dict(packet["frame"]),
+        "players": [],
+    }
+
+    frame_width = mirrored_packet["frame"]["width"]
+
+    for player in packet.get("players", []):
+        mirrored_joints = {}
+        for joint_name, joint in player["joints"].items():
+            mirrored_joint = dict(joint)
+            mirrored_joint["x"] = float(frame_width - joint["x"])
+            mirrored_joints[joint_name] = mirrored_joint
+
+        mirrored_packet["players"].append(
+            {
+                "id": player["id"],
+                "joints": mirrored_joints,
+            }
+        )
+
+    return mirrored_packet
+
+
 class PoseTracker:
     def __init__(self, model_path=MODEL_PATH):
         self.model_path = Path(model_path)
@@ -105,18 +131,19 @@ class PoseTracker:
                 f"Expected path: {self.model_path.resolve()}"
             ) from exc
 
-    def process_frame(self, frame, timestamp_ms=None):
-        flipped_frame = cv2.flip(frame, 1)
-        height, width = flipped_frame.shape[:2]
+    def process_frame(self, frame, timestamp_ms=None, mirror_preview=False):
+        height, width = frame.shape[:2]
 
-        rgb_frame = cv2.cvtColor(flipped_frame, cv2.COLOR_BGR2RGB)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
         video_timestamp_ms = int(time.time() * 1000) if timestamp_ms is None else timestamp_ms
         result = self._landmarker.detect_for_video(mp_image, video_timestamp_ms)
         packet = build_packet(result, width, height, video_timestamp_ms)
+        preview_frame = cv2.flip(frame, 1) if mirror_preview else frame.copy()
+        preview_packet = mirror_packet(packet) if mirror_preview else packet
 
-        return flipped_frame, packet
+        return preview_frame, packet, preview_packet
 
     def close(self):
         self._landmarker.close()

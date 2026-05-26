@@ -15,6 +15,7 @@ def run_live_tracking(
     udp_host=None,
     udp_port=None,
     recording_path=None,
+    mirror=False,
     window_title="MediaPipe Tracker",
 ):
     tracker = PoseTracker(model_path=model_path)
@@ -45,7 +46,7 @@ def run_live_tracking(
                 print("Could not read frame")
                 break
 
-            frame, packet = tracker.process_frame(raw_frame)
+            frame, packet, preview_packet = tracker.process_frame(raw_frame, mirror_preview=mirror)
 
             if sender:
                 sender.send_packet(packet)
@@ -56,6 +57,7 @@ def run_live_tracking(
             overlay_lines = ["MediaPipe body tracking - press Q to quit"]
             if sender:
                 overlay_lines.append(f"UDP -> {sender.host}:{sender.port}")
+            overlay_lines.append(f"Preview -> {'mirrored' if mirror else 'not mirrored'}")
             if recording_target:
                 if is_recording and current_recording_path is not None:
                     overlay_lines.append(
@@ -65,7 +67,7 @@ def run_live_tracking(
                     next_path = next_recording_path(recording_target)
                     overlay_lines.append(f"REC OFF -> press R to start ({next_path.name})")
 
-            draw_packet(frame, packet, header_lines=overlay_lines)
+            draw_packet(frame, preview_packet, header_lines=overlay_lines)
             cv2.imshow(window_title, frame)
 
             key = cv2.waitKey(1) & 0xFF

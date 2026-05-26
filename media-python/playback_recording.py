@@ -3,6 +3,7 @@ import argparse
 import cv2
 
 from recording_io import load_recording
+from tracking import mirror_packet
 from visualization import create_canvas, draw_packet
 
 
@@ -11,10 +12,11 @@ def parse_args():
     parser.add_argument("recording", help="Path to the recording JSON file.")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier.")
     parser.add_argument("--loop", action="store_true", help="Loop playback until Q is pressed.")
+    parser.add_argument("--mirror", action="store_true", help="Mirror the playback view only. The recording data remains unmirrored.")
     return parser.parse_args()
 
 
-def playback_frames(frames, speed=1.0, loop=False):
+def playback_frames(frames, speed=1.0, loop=False, mirror=False):
     if not frames:
         raise RuntimeError("Recording does not contain any frames")
 
@@ -23,14 +25,16 @@ def playback_frames(frames, speed=1.0, loop=False):
 
     while True:
         packet = frames[frame_index]
+        display_packet = mirror_packet(packet) if mirror else packet
         canvas = create_canvas(packet)
         overlay_lines = [
             "Recording playback - press Q to quit",
             f"Frame {frame_index + 1}/{len(frames)}",
             f"Speed x{speed:g}",
+            f"Preview {'mirrored' if mirror else 'not mirrored'}",
         ]
 
-        draw_packet(canvas, packet, header_lines=overlay_lines)
+        draw_packet(canvas, display_packet, header_lines=overlay_lines)
         is_last_frame = frame_index >= len(frames) - 1
 
         if is_last_frame:
@@ -61,7 +65,7 @@ def playback_frames(frames, speed=1.0, loop=False):
 def main():
     args = parse_args()
     recording = load_recording(args.recording)
-    playback_frames(recording["frames"], speed=args.speed, loop=args.loop)
+    playback_frames(recording["frames"], speed=args.speed, loop=args.loop, mirror=args.mirror)
 
 
 if __name__ == "__main__":
