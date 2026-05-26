@@ -9,8 +9,27 @@ public class MediaPipeHumanoidIK : MonoBehaviour
     [Header("Animator")]
     public Animator animator;
 
+    [Header("Bone Rotation Drive")]
+    public bool driveBoneRotations = true;
+    public float boneRotationSmoothing = 16.0f;
+
+    [Range(0.0f, 1.0f)]
+    public float armRotationWeight = 0.9f;
+
+    [Range(0.0f, 1.0f)]
+    public float legRotationWeight = 0.8f;
+
+    [Range(0.0f, 1.0f)]
+    public float headRotationWeight = 0.35f;
+
+    public Vector3 upperArmAxisOffset = new Vector3(0, 0, 0);
+    public Vector3 lowerArmAxisOffset = new Vector3(0, 0, 0);
+    public Vector3 upperLegAxisOffset = new Vector3(0, 0, 0);
+    public Vector3 lowerLegAxisOffset = new Vector3(0, 0, 0);
+    public Vector3 headAxisOffset = new Vector3(0, 0, 0);
+
     [Header("Mirror / Swap")]
-    public bool swapLeftRight = true;
+    public bool swapLeftRight = false;
     public bool mirrorX = false;
 
     [Header("Body Mapping")]
@@ -65,6 +84,37 @@ public class MediaPipeHumanoidIK : MonoBehaviour
     private Transform leftFootSphere;
     private Transform rightFootSphere;
 
+    private Transform headBone;
+    private Transform leftUpperArmBone;
+    private Transform leftLowerArmBone;
+    private Transform rightUpperArmBone;
+    private Transform rightLowerArmBone;
+    private Transform leftUpperLegBone;
+    private Transform leftLowerLegBone;
+    private Transform rightUpperLegBone;
+    private Transform rightLowerLegBone;
+
+    private Transform leftHandBone;
+    private Transform rightHandBone;
+    private Transform leftFootBone;
+    private Transform rightFootBone;
+
+    private Vector3 leftUpperArmAimAxis = Vector3.right;
+    private Vector3 rightUpperArmAimAxis = Vector3.left;
+    private Vector3 leftLowerArmAimAxis = Vector3.right;
+    private Vector3 rightLowerArmAimAxis = Vector3.left;
+    private Vector3 leftUpperLegAimAxis = Vector3.down;
+    private Vector3 rightUpperLegAimAxis = Vector3.down;
+    private Vector3 leftLowerLegAimAxis = Vector3.down;
+    private Vector3 rightLowerLegAimAxis = Vector3.down;
+    private Vector3 headAimAxis = Vector3.forward;
+
+    private PosePacket latestPacket;
+    private PlayerPose latestPlayer;
+
+    private bool warnedMissingBones;
+    private float lastIkCallbackTime;
+
     private bool hasPose;
 
     private void Start()
@@ -89,6 +139,33 @@ public class MediaPipeHumanoidIK : MonoBehaviour
             Debug.Log("Avatar is human: " + animator.avatar.isHuman);
             Debug.Log("Avatar is valid: " + animator.avatar.isValid);
         }
+
+        headBone = animator.GetBoneTransform(HumanBodyBones.Head);
+
+        leftUpperArmBone = animator.GetBoneTransform(HumanBodyBones.LeftUpperArm);
+        leftLowerArmBone = animator.GetBoneTransform(HumanBodyBones.LeftLowerArm);
+        rightUpperArmBone = animator.GetBoneTransform(HumanBodyBones.RightUpperArm);
+        rightLowerArmBone = animator.GetBoneTransform(HumanBodyBones.RightLowerArm);
+
+        leftUpperLegBone = animator.GetBoneTransform(HumanBodyBones.LeftUpperLeg);
+        leftLowerLegBone = animator.GetBoneTransform(HumanBodyBones.LeftLowerLeg);
+        rightUpperLegBone = animator.GetBoneTransform(HumanBodyBones.RightUpperLeg);
+        rightLowerLegBone = animator.GetBoneTransform(HumanBodyBones.RightLowerLeg);
+
+        leftHandBone = animator.GetBoneTransform(HumanBodyBones.LeftHand);
+        rightHandBone = animator.GetBoneTransform(HumanBodyBones.RightHand);
+        leftFootBone = animator.GetBoneTransform(HumanBodyBones.LeftFoot);
+        rightFootBone = animator.GetBoneTransform(HumanBodyBones.RightFoot);
+
+        CacheBoneAimAxes();
+
+        if (swapLeftRight)
+        {
+            Debug.LogWarning("MediaPipeHumanoidIK: swapLeftRight was enabled in scene data; forcing false for canonical non-mirrored UDP input.");
+            swapLeftRight = false;
+        }
+
+        ValidateBoneBindings();
 
         if (showDebugTargets)
         {
@@ -144,6 +221,8 @@ public class MediaPipeHumanoidIK : MonoBehaviour
             return;
         }
 
+        latestPacket = packet;
+        latestPlayer = player;
         hasPose = true;
 
         if (moveRoot)
@@ -157,6 +236,27 @@ public class MediaPipeHumanoidIK : MonoBehaviour
         {
             UpdateDebugSpheres();
         }
+    }
+
+    private void LateUpdate()
+    {
+        if (!warnedMissingBones)
+        {
+            ValidateBoneBindings();
+        }
+
+        if (Time.time - lastIkCallbackTime > 2.0f)
+        {
+            Debug.LogWarning("MediaPipeHumanoidIK: OnAnimatorIK is not being called. Ensure Animator has a valid controller state and IK Pass enabled.");
+            lastIkCallbackTime = Time.time;
+        }
+
+        if (!driveBoneRotations || !hasPose || latestPacket == null || latestPlayer == null)
+        {
+            return;
+        }
+
+        ApplyBoneRotations(latestPacket, latestPlayer);
     }
 
     private void MoveRoot(PosePacket packet, PlayerPose player)
@@ -338,8 +438,138 @@ public class MediaPipeHumanoidIK : MonoBehaviour
         }
     }
 
+    private void ApplyBoneRotations(PosePacket packet, PlayerPose player)
+    {
+        JointPoint leftShoulderJoint = player.joints.left_shoulder;
+        JointPoint rightShoulderJoint = player.joints.right_shoulder;
+        JointPoint leftElbowJoint = player.joints.left_elbow;
+        JointPoint rightElbowJoint = player.joints.right_elbow;
+        JointPoint leftWristJoint = player.joints.left_wrist;
+        JointPoint rightWristJoint = player.joints.right_wrist;
+
+        JointPoint leftHipJoint = player.joints.left_hip;
+        JointPoint rightHipJoint = player.joints.right_hip;
+        JointPoint leftKneeJoint = player.joints.left_knee;
+        JointPoint rightKneeJoint = player.joints.right_knee;
+        JointPoint leftAnkleJoint = player.joints.left_ankle;
+        JointPoint rightAnkleJoint = player.joints.right_ankle;
+
+        if (swapLeftRight)
+        {
+            leftShoulderJoint = player.joints.right_shoulder;
+            rightShoulderJoint = player.joints.left_shoulder;
+            leftElbowJoint = player.joints.right_elbow;
+            rightElbowJoint = player.joints.left_elbow;
+            leftWristJoint = player.joints.right_wrist;
+            rightWristJoint = player.joints.left_wrist;
+
+            leftHipJoint = player.joints.right_hip;
+            rightHipJoint = player.joints.left_hip;
+            leftKneeJoint = player.joints.right_knee;
+            rightKneeJoint = player.joints.left_knee;
+            leftAnkleJoint = player.joints.right_ankle;
+            rightAnkleJoint = player.joints.left_ankle;
+        }
+
+        Vector2 bodyCenter = GetBodyCenter(player);
+        float bodySize = GetBodySize(player);
+
+        Vector3 leftShoulder = JointToAvatarWorld(leftShoulderJoint, bodyCenter, bodySize);
+        Vector3 rightShoulder = JointToAvatarWorld(rightShoulderJoint, bodyCenter, bodySize);
+        Vector3 leftElbow = JointToAvatarWorld(leftElbowJoint, bodyCenter, bodySize);
+        Vector3 rightElbow = JointToAvatarWorld(rightElbowJoint, bodyCenter, bodySize);
+        Vector3 leftWrist = JointToAvatarWorld(leftWristJoint, bodyCenter, bodySize);
+        Vector3 rightWrist = JointToAvatarWorld(rightWristJoint, bodyCenter, bodySize);
+
+        Vector3 leftHip = JointToAvatarWorld(leftHipJoint, bodyCenter, bodySize);
+        Vector3 rightHip = JointToAvatarWorld(rightHipJoint, bodyCenter, bodySize);
+        Vector3 leftKnee = JointToAvatarWorld(leftKneeJoint, bodyCenter, bodySize);
+        Vector3 rightKnee = JointToAvatarWorld(rightKneeJoint, bodyCenter, bodySize);
+        Vector3 leftAnkle = JointToAvatarWorld(leftAnkleJoint, bodyCenter, bodySize);
+        Vector3 rightAnkle = JointToAvatarWorld(rightAnkleJoint, bodyCenter, bodySize);
+
+        Vector3 nose = JointToAvatarWorld(player.joints.nose, bodyCenter, bodySize);
+        Vector3 shoulderCenter = (leftShoulder + rightShoulder) * 0.5f;
+
+        RotateBoneToward(leftUpperArmBone, leftUpperArmAimAxis, leftElbow - leftShoulder, armRotationWeight, upperArmAxisOffset);
+        RotateBoneToward(leftLowerArmBone, leftLowerArmAimAxis, leftWrist - leftElbow, armRotationWeight, lowerArmAxisOffset);
+        RotateBoneToward(rightUpperArmBone, rightUpperArmAimAxis, rightElbow - rightShoulder, armRotationWeight, upperArmAxisOffset);
+        RotateBoneToward(rightLowerArmBone, rightLowerArmAimAxis, rightWrist - rightElbow, armRotationWeight, lowerArmAxisOffset);
+
+        RotateBoneToward(leftUpperLegBone, leftUpperLegAimAxis, leftKnee - leftHip, legRotationWeight, upperLegAxisOffset);
+        RotateBoneToward(leftLowerLegBone, leftLowerLegAimAxis, leftAnkle - leftKnee, legRotationWeight, lowerLegAxisOffset);
+        RotateBoneToward(rightUpperLegBone, rightUpperLegAimAxis, rightKnee - rightHip, legRotationWeight, upperLegAxisOffset);
+        RotateBoneToward(rightLowerLegBone, rightLowerLegAimAxis, rightAnkle - rightKnee, legRotationWeight, lowerLegAxisOffset);
+
+        RotateBoneToward(headBone, headAimAxis, nose - shoulderCenter, headRotationWeight, headAxisOffset);
+    }
+
+    private void CacheBoneAimAxes()
+    {
+        leftUpperArmAimAxis = ComputeAimAxis(leftUpperArmBone, leftLowerArmBone, leftUpperArmAimAxis);
+        rightUpperArmAimAxis = ComputeAimAxis(rightUpperArmBone, rightLowerArmBone, rightUpperArmAimAxis);
+
+        leftLowerArmAimAxis = ComputeAimAxis(leftLowerArmBone, leftHandBone, leftLowerArmAimAxis);
+        rightLowerArmAimAxis = ComputeAimAxis(rightLowerArmBone, rightHandBone, rightLowerArmAimAxis);
+
+        leftUpperLegAimAxis = ComputeAimAxis(leftUpperLegBone, leftLowerLegBone, leftUpperLegAimAxis);
+        rightUpperLegAimAxis = ComputeAimAxis(rightUpperLegBone, rightLowerLegBone, rightUpperLegAimAxis);
+
+        leftLowerLegAimAxis = ComputeAimAxis(leftLowerLegBone, leftFootBone, leftLowerLegAimAxis);
+        rightLowerLegAimAxis = ComputeAimAxis(rightLowerLegBone, rightFootBone, rightLowerLegAimAxis);
+    }
+
+    private Vector3 ComputeAimAxis(Transform bone, Transform childBone, Vector3 fallbackAxis)
+    {
+        if (bone == null || childBone == null)
+        {
+            return fallbackAxis.normalized;
+        }
+
+        Vector3 worldDirection = childBone.position - bone.position;
+
+        if (worldDirection.sqrMagnitude < 0.000001f)
+        {
+            return fallbackAxis.normalized;
+        }
+
+        Vector3 localDirection = bone.InverseTransformDirection(worldDirection.normalized);
+
+        if (localDirection.sqrMagnitude < 0.000001f)
+        {
+            return fallbackAxis.normalized;
+        }
+
+        return localDirection.normalized;
+    }
+
+    private void RotateBoneToward(Transform bone, Vector3 aimAxis, Vector3 direction, float weight, Vector3 axisOffset)
+    {
+        if (bone == null || weight <= 0.0f)
+        {
+            return;
+        }
+
+        if (direction.sqrMagnitude < 0.0001f)
+        {
+            return;
+        }
+
+        Vector3 currentAimWorld = bone.TransformDirection(aimAxis.normalized);
+        Quaternion deltaRotation = Quaternion.FromToRotation(currentAimWorld, direction.normalized);
+        Quaternion adjustedRotation = deltaRotation * bone.rotation * Quaternion.Euler(axisOffset);
+
+        bone.rotation = Quaternion.Slerp(
+            bone.rotation,
+            adjustedRotation,
+            Time.deltaTime * boneRotationSmoothing * weight
+        );
+    }
+
     private void OnAnimatorIK(int layerIndex)
     {
+        lastIkCallbackTime = Time.time;
+
         if (!hasPose || animator == null)
         {
             return;
@@ -371,5 +601,26 @@ public class MediaPipeHumanoidIK : MonoBehaviour
 
         animator.SetLookAtWeight(lookWeight);
         animator.SetLookAtPosition(headTarget);
+    }
+
+    private void ValidateBoneBindings()
+    {
+        bool missingBones =
+            leftUpperArmBone == null ||
+            leftLowerArmBone == null ||
+            rightUpperArmBone == null ||
+            rightLowerArmBone == null ||
+            leftUpperLegBone == null ||
+            leftLowerLegBone == null ||
+            rightUpperLegBone == null ||
+            rightLowerLegBone == null;
+
+        if (missingBones)
+        {
+            warnedMissingBones = true;
+            Debug.LogError(
+                "MediaPipeHumanoidIK: Missing humanoid bone transforms. Check model Rig settings: Avatar must be Humanoid and, if Optimize Game Objects is enabled, expose required bones."
+            );
+        }
     }
 }

@@ -4,6 +4,7 @@ import cv2
 
 from recording_io import load_recording
 from tracking import mirror_packet
+from udp_sender import UDP_HOST, UDP_PORT, UdpSender
 from visualization import create_canvas, draw_packet
 
 
@@ -13,59 +14,81 @@ def parse_args():
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier.")
     parser.add_argument("--loop", action="store_true", help="Loop playback until Q is pressed.")
     parser.add_argument("--mirror", action="store_true", help="Mirror the playback view only. The recording data remains unmirrored.")
+    parser.add_argument("--udp-host", default=UDP_HOST, help="UDP host to send replay packets to.")
+    parser.add_argument("--udp-port", type=int, default=UDP_PORT, help="UDP port to send replay packets to.")
     return parser.parse_args()
 
 
-def playback_frames(frames, speed=1.0, loop=False, mirror=False):
+def playback_frames(
+    frames,
+    speed=1.0,
+    loop=False,
+    mirror=False,
+    udp_host=UDP_HOST,
+    udp_port=UDP_PORT,
+):
     if not frames:
         raise RuntimeError("Recording does not contain any frames")
 
+    sender = UdpSender(host=udp_host, port=udp_port)
     frame_index = 0
     speed = max(speed, 0.01)
 
-    while True:
-        packet = frames[frame_index]
-        display_packet = mirror_packet(packet) if mirror else packet
-        canvas = create_canvas(packet)
-        overlay_lines = [
-            "Recording playback - press Q to quit",
-            f"Frame {frame_index + 1}/{len(frames)}",
-            f"Speed x{speed:g}",
-            f"Preview {'mirrored' if mirror else 'not mirrored'}",
-        ]
+    try:
+        while True:
+            packet = frames[frame_index]
+            sender.send_packet(packet)
 
-        draw_packet(canvas, display_packet, header_lines=overlay_lines)
-        is_last_frame = frame_index >= len(frames) - 1
+            display_packet = mirror_packet(packet) if mirror else packet
+            canvas = create_canvas(packet)
+            overlay_lines = [
+                "Recording playback - press Q to quit",
+                f"Frame {frame_index + 1}/{len(frames)}",
+                f"Speed x{speed:g}",
+                f"Preview {'mirrored' if mirror else 'not mirrored'}",
+                f"UDP -> {udp_host}:{udp_port}",
+            ]
 
-        if is_last_frame:
-            delay_ms = 1
-        else:
-            next_timestamp = frames[frame_index + 1]["timestamp_ms"]
-            current_timestamp = packet["timestamp_ms"]
-            delta_ms = max(1, next_timestamp - current_timestamp)
-            delay_ms = max(1, int(delta_ms / speed))
+            draw_packet(canvas, display_packet, header_lines=overlay_lines)
+            is_last_frame = frame_index >= len(frames) - 1
 
-        cv2.imshow("Tracking Playback", canvas)
-        key = cv2.waitKey(delay_ms) & 0xFF
+            if is_last_frame:
+                delay_ms = 1
+            else:
+                next_timestamp = frames[frame_index + 1]["timestamp_ms"]
+                current_timestamp = packet["timestamp_ms"]
+                delta_ms = max(1, next_timestamp - current_timestamp)
+                delay_ms = max(1, int(delta_ms / speed))
 
-        if key == ord("q"):
-            break
+            cv2.imshow("Tracking Playback", canvas)
+            key = cv2.waitKey(delay_ms) & 0xFF
 
-        if is_last_frame:
-            if not loop:
+            if key == ord("q"):
                 break
-            frame_index = 0
-            continue
 
-        frame_index += 1
+            if is_last_frame:
+                if not loop:
+                    break
+                frame_index = 0
+                continue
 
-    cv2.destroyAllWindows()
+            frame_index += 1
+    finally:
+        sender.close()
+        cv2.destroyAllWindows()
 
 
 def main():
     args = parse_args()
     recording = load_recording(args.recording)
-    playback_frames(recording["frames"], speed=args.speed, loop=args.loop, mirror=args.mirror)
+    playback_frames(
+        recording["frames"],
+        speed=args.speed,
+        loop=args.loop,
+        mirror=args.mirror,
+        udp_host=args.udp_host,
+        udp_port=args.udp_port,
+    )
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ There are three runnable scripts:
 
 - `track_people.py`: live camera tracking, on-screen visualization, and UDP packet sending.
 - `record_tracking.py`: live camera tracking, on-screen visualization, and JSON recording toggled with `r`.
-- `playback_recording.py`: playback of a previously recorded JSON session.
+- `playback_recording.py`: playback of a previously recorded JSON session while re-sending UDP packets frame-by-frame.
 
 By default, all scripts show a non-mirrored view. Pass `--mirror` if you want the preview or playback view mirrored. JSON recordings and UDP packets always stay unmirrored.
 
@@ -82,6 +82,7 @@ Optional flags:
 ```bash
 python playback_recording.py recording.json --speed 2.0 --loop
 python playback_recording.py recording.json --mirror
+python playback_recording.py recording.json --udp-host 127.0.0.1 --udp-port 5052
 ```
 
 ## Notes
