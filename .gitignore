@@ -1,3 +1,38 @@
 __pycache__/
 *.py[cod]
 pose_landmarker_full.task
+
+# Unity project ignores (scoped to kinect-tabs/)
+kinect-tabs/[Ll]ibrary/
+kinect-tabs/[Tt]emp/
+kinect-tabs/[Oo]bj/
+kinect-tabs/[Bb]uild/
+kinect-tabs/[Bb]uilds/
+kinect-tabs/[Ll]ogs/
+kinect-tabs/[Uu]ser[Ss]ettings/
+kinect-tabs/[Mm]emoryCaptures/
+kinect-tabs/[Rr]ecordings/
+
+# Generated IDE/project files
+kinect-tabs/*.csproj
+kinect-tabs/*.unityproj
+kinect-tabs/*.sln
+kinect-tabs/*.slnx
+kinect-tabs/*.suo
+kinect-tabs/*.user
+kinect-tabs/*.userprefs
+kinect-tabs/*.pidb
+kinect-tabs/*.booproj
+kinect-tabs/*.svd
+kinect-tabs/*.pdb
+kinect-tabs/*.mdb
+kinect-tabs/*.opendb
+kinect-tabs/*.VC.db
+
+# Unity generated metadata and diagnostics
+kinect-tabs/sysinfo.txt
+kinect-tabs/.vs/
+kinect-tabs/.idea/
+kinect-tabs/.gradle/
+kinect-tabs/.DS_Store
+kinect-tabs/Thumbs.db
