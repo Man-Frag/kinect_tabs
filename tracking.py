@@ -1,5 +1,6 @@
 import time
 from pathlib import Path
+from urllib.request import urlretrieve
 
 import cv2
 import mediapipe as mp
@@ -9,6 +10,10 @@ from mediapipe.tasks.python import vision
 
 MODEL_PATH = "pose_landmarker_full.task"
 CAMERA_INDEX = 0
+DEFAULT_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+    "pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+)
 
 JOINT_INDICES = {
     "nose": 0,
@@ -70,7 +75,10 @@ class PoseTracker:
         self.model_path = Path(model_path)
 
         if not self.model_path.exists():
-            raise FileNotFoundError(f"Model file not found: {self.model_path.resolve()}")
+            if self.model_path.name == MODEL_PATH:
+                self._download_default_model()
+            else:
+                raise FileNotFoundError(f"Model file not found: {self.model_path.resolve()}")
 
         base_options = python.BaseOptions(model_asset_path=str(self.model_path))
 
@@ -84,6 +92,18 @@ class PoseTracker:
         )
 
         self._landmarker = vision.PoseLandmarker.create_from_options(options)
+
+    def _download_default_model(self):
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Downloading pose model to {self.model_path.resolve()}...")
+
+        try:
+            urlretrieve(DEFAULT_MODEL_URL, self.model_path)
+        except Exception as exc:
+            raise FileNotFoundError(
+                "Default pose model is missing and could not be downloaded automatically. "
+                f"Expected path: {self.model_path.resolve()}"
+            ) from exc
 
     def process_frame(self, frame, timestamp_ms=None):
         flipped_frame = cv2.flip(frame, 1)

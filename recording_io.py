@@ -18,6 +18,24 @@ def save_recording(path, packets):
     return recording_path
 
 
+def next_recording_path(path):
+    recording_path = Path(path)
+
+    if not recording_path.exists():
+        return recording_path
+
+    suffix = recording_path.suffix
+    stem = recording_path.stem
+    parent = recording_path.parent
+    index = 2
+
+    while True:
+        candidate = parent / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
 def load_recording(path):
     recording_path = Path(path)
     payload = json.loads(recording_path.read_text(encoding="utf-8"))
