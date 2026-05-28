@@ -105,11 +105,13 @@ public class UdpPoseReceiver : MonoBehaviour
         udpClient = new UdpClient(port);
         running = true;
 
-        receiveThread = new Thread(ReceiveLoop);
-        receiveThread.IsBackground = true;
+        receiveThread = new Thread(ReceiveLoop)
+        {
+            IsBackground = true,
+        };
         receiveThread.Start();
 
-        Debug.Log($"Listening for MediaPipe UDP packets on port {port}");
+        Debug.Log($"pipe-test listening for MediaPipe UDP packets on port {port}");
     }
 
     private void ReceiveLoop()
@@ -122,7 +124,6 @@ public class UdpPoseReceiver : MonoBehaviour
             {
                 byte[] data = udpClient.Receive(ref remoteEndPoint);
                 string json = Encoding.UTF8.GetString(data);
-
                 PosePacket packet = JsonUtility.FromJson<PosePacket>(json);
 
                 lock (packetLock)
@@ -132,7 +133,7 @@ public class UdpPoseReceiver : MonoBehaviour
             }
             catch
             {
-                // Ignore shutdown errors.
+                // Ignore socket closure and malformed packet errors.
             }
         }
     }

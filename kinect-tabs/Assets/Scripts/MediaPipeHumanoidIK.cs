@@ -12,6 +12,13 @@ public class MediaPipeHumanoidIK : MonoBehaviour
     [Header("Bone Rotation Drive")]
     public bool driveBoneRotations = true;
     public float boneRotationSmoothing = 16.0f;
+    public bool preferPacketBoneVectors = true;
+
+    [Range(0.0f, 1.0f)]
+    public float minBoneVectorConfidence = 0.25f;
+
+    [Tooltip("If false, arm/leg bone rotations are skipped when IK weights for those limbs are active to avoid double-driving.")]
+    public bool blendBoneRotationsWithIK = false;
 
     [Range(0.0f, 1.0f)]
     public float armRotationWeight = 0.9f;
@@ -35,7 +42,10 @@ public class MediaPipeHumanoidIK : MonoBehaviour
     [Header("Body Mapping")]
     public float horizontalScale = 3.0f;
     public float verticalScale = 3.0f;
+    public float horizontalMotionGain = 1.0f;
+    public float verticalMotionGain = 1.0f;
     public float depthScale = 1.0f;
+    public float depthMotionGain = 2.8f;
     public float forwardOffset = 0.7f;
     public float bodyYOffset = 1.0f;
 
@@ -115,6 +125,16 @@ public class MediaPipeHumanoidIK : MonoBehaviour
     private bool warnedMissingBones;
     private float lastIkCallbackTime;
 
+    private Quaternion headRestLocalRotation;
+    private Quaternion leftUpperArmRestLocalRotation;
+    private Quaternion leftLowerArmRestLocalRotation;
+    private Quaternion rightUpperArmRestLocalRotation;
+    private Quaternion rightLowerArmRestLocalRotation;
+    private Quaternion leftUpperLegRestLocalRotation;
+    private Quaternion leftLowerLegRestLocalRotation;
+    private Quaternion rightUpperLegRestLocalRotation;
+    private Quaternion rightLowerLegRestLocalRotation;
+
     private bool hasPose;
 
     private void Start()
@@ -140,6 +160,8 @@ public class MediaPipeHumanoidIK : MonoBehaviour
             Debug.Log("Avatar is valid: " + animator.avatar.isValid);
         }
 
+        DisableConflictingDrivers();
+
         headBone = animator.GetBoneTransform(HumanBodyBones.Head);
 
         leftUpperArmBone = animator.GetBoneTransform(HumanBodyBones.LeftUpperArm);
@@ -158,6 +180,7 @@ public class MediaPipeHumanoidIK : MonoBehaviour
         rightFootBone = animator.GetBoneTransform(HumanBodyBones.RightFoot);
 
         CacheBoneAimAxes();
+        CacheRestLocalRotations();
 
         if (swapLeftRight)
         {
@@ -251,12 +274,6 @@ public class MediaPipeHumanoidIK : MonoBehaviour
             lastIkCallbackTime = Time.time;
         }
 
-        if (!driveBoneRotations || !hasPose || latestPacket == null || latestPlayer == null)
-        {
-            return;
-        }
-
-        ApplyBoneRotations(latestPacket, latestPlayer);
     }
 
     private void MoveRoot(PosePacket packet, PlayerPose player)
@@ -322,20 +339,21 @@ public class MediaPipeHumanoidIK : MonoBehaviour
 
         Vector2 bodyCenter = GetBodyCenter(player);
         float bodySize = GetBodySize(player);
+        float bodyDepthCenter = GetBodyDepthCenter(player);
 
-        UpdateTarget(packet, leftWrist, bodyCenter, bodySize, ref leftHandTarget);
-        UpdateTarget(packet, rightWrist, bodyCenter, bodySize, ref rightHandTarget);
+        UpdateTarget(packet, leftWrist, bodyCenter, bodySize, bodyDepthCenter, ref leftHandTarget);
+        UpdateTarget(packet, rightWrist, bodyCenter, bodySize, bodyDepthCenter, ref rightHandTarget);
 
-        UpdateTarget(packet, leftElbow, bodyCenter, bodySize, ref leftElbowHint);
-        UpdateTarget(packet, rightElbow, bodyCenter, bodySize, ref rightElbowHint);
+        UpdateTarget(packet, leftElbow, bodyCenter, bodySize, bodyDepthCenter, ref leftElbowHint);
+        UpdateTarget(packet, rightElbow, bodyCenter, bodySize, bodyDepthCenter, ref rightElbowHint);
 
-        UpdateTarget(packet, leftAnkle, bodyCenter, bodySize, ref leftFootTarget);
-        UpdateTarget(packet, rightAnkle, bodyCenter, bodySize, ref rightFootTarget);
+        UpdateTarget(packet, leftAnkle, bodyCenter, bodySize, bodyDepthCenter, ref leftFootTarget);
+        UpdateTarget(packet, rightAnkle, bodyCenter, bodySize, bodyDepthCenter, ref rightFootTarget);
 
-        UpdateTarget(packet, leftKnee, bodyCenter, bodySize, ref leftKneeHint);
-        UpdateTarget(packet, rightKnee, bodyCenter, bodySize, ref rightKneeHint);
+        UpdateTarget(packet, leftKnee, bodyCenter, bodySize, bodyDepthCenter, ref leftKneeHint);
+        UpdateTarget(packet, rightKnee, bodyCenter, bodySize, bodyDepthCenter, ref rightKneeHint);
 
-        UpdateTarget(packet, player.joints.nose, bodyCenter, bodySize, ref headTarget);
+        UpdateTarget(packet, player.joints.nose, bodyCenter, bodySize, bodyDepthCenter, ref headTarget);
     }
 
     private Vector2 GetBodyCenter(PlayerPose player)
@@ -372,11 +390,22 @@ public class MediaPipeHumanoidIK : MonoBehaviour
         return Mathf.Max(torsoHeight, shoulderWidth, 1.0f);
     }
 
+    private float GetBodyDepthCenter(PlayerPose player)
+    {
+        return (
+            player.joints.left_hip.z +
+            player.joints.right_hip.z +
+            player.joints.left_shoulder.z +
+            player.joints.right_shoulder.z
+        ) * 0.25f;
+    }
+
     private void UpdateTarget(
         PosePacket packet,
         JointPoint joint,
         Vector2 bodyCenter,
         float bodySize,
+        float bodyDepthCenter,
         ref Vector3 target
     )
     {
@@ -385,7 +414,7 @@ public class MediaPipeHumanoidIK : MonoBehaviour
             return;
         }
 
-        Vector3 mappedPosition = JointToAvatarWorld(joint, bodyCenter, bodySize);
+        Vector3 mappedPosition = JointToAvatarWorld(joint, bodyCenter, bodySize, bodyDepthCenter);
 
         target = Vector3.Lerp(
             target,
@@ -394,17 +423,17 @@ public class MediaPipeHumanoidIK : MonoBehaviour
         );
     }
 
-    private Vector3 JointToAvatarWorld(JointPoint joint, Vector2 bodyCenter, float bodySize)
+    private Vector3 JointToAvatarWorld(JointPoint joint, Vector2 bodyCenter, float bodySize, float bodyDepthCenter)
     {
-        float relativeX = (joint.x - bodyCenter.x) / bodySize;
-        float relativeY = -(joint.y - bodyCenter.y) / bodySize;
+        float relativeX = ((joint.x - bodyCenter.x) / bodySize) * horizontalMotionGain;
+        float relativeY = (-(joint.y - bodyCenter.y) / bodySize) * verticalMotionGain;
 
         if (mirrorX)
         {
             relativeX = -relativeX;
         }
 
-        float relativeZ = -joint.z * depthScale;
+        float relativeZ = -(joint.z - bodyDepthCenter) * depthScale * depthMotionGain;
 
         Vector3 localTarget = new Vector3(
             relativeX * horizontalScale,
@@ -440,6 +469,11 @@ public class MediaPipeHumanoidIK : MonoBehaviour
 
     private void ApplyBoneRotations(PosePacket packet, PlayerPose player)
     {
+        if (preferPacketBoneVectors && TryApplyBoneRotationsFromPacketVectors(player))
+        {
+            return;
+        }
+
         JointPoint leftShoulderJoint = player.joints.left_shoulder;
         JointPoint rightShoulderJoint = player.joints.right_shoulder;
         JointPoint leftElbowJoint = player.joints.left_elbow;
@@ -473,35 +507,186 @@ public class MediaPipeHumanoidIK : MonoBehaviour
 
         Vector2 bodyCenter = GetBodyCenter(player);
         float bodySize = GetBodySize(player);
+        float bodyDepthCenter = GetBodyDepthCenter(player);
 
-        Vector3 leftShoulder = JointToAvatarWorld(leftShoulderJoint, bodyCenter, bodySize);
-        Vector3 rightShoulder = JointToAvatarWorld(rightShoulderJoint, bodyCenter, bodySize);
-        Vector3 leftElbow = JointToAvatarWorld(leftElbowJoint, bodyCenter, bodySize);
-        Vector3 rightElbow = JointToAvatarWorld(rightElbowJoint, bodyCenter, bodySize);
-        Vector3 leftWrist = JointToAvatarWorld(leftWristJoint, bodyCenter, bodySize);
-        Vector3 rightWrist = JointToAvatarWorld(rightWristJoint, bodyCenter, bodySize);
+        Vector3 leftShoulder = JointToAvatarWorld(leftShoulderJoint, bodyCenter, bodySize, bodyDepthCenter);
+        Vector3 rightShoulder = JointToAvatarWorld(rightShoulderJoint, bodyCenter, bodySize, bodyDepthCenter);
+        Vector3 leftElbow = JointToAvatarWorld(leftElbowJoint, bodyCenter, bodySize, bodyDepthCenter);
+        Vector3 rightElbow = JointToAvatarWorld(rightElbowJoint, bodyCenter, bodySize, bodyDepthCenter);
+        Vector3 leftWrist = JointToAvatarWorld(leftWristJoint, bodyCenter, bodySize, bodyDepthCenter);
+        Vector3 rightWrist = JointToAvatarWorld(rightWristJoint, bodyCenter, bodySize, bodyDepthCenter);
 
-        Vector3 leftHip = JointToAvatarWorld(leftHipJoint, bodyCenter, bodySize);
-        Vector3 rightHip = JointToAvatarWorld(rightHipJoint, bodyCenter, bodySize);
-        Vector3 leftKnee = JointToAvatarWorld(leftKneeJoint, bodyCenter, bodySize);
-        Vector3 rightKnee = JointToAvatarWorld(rightKneeJoint, bodyCenter, bodySize);
-        Vector3 leftAnkle = JointToAvatarWorld(leftAnkleJoint, bodyCenter, bodySize);
-        Vector3 rightAnkle = JointToAvatarWorld(rightAnkleJoint, bodyCenter, bodySize);
+        Vector3 leftHip = JointToAvatarWorld(leftHipJoint, bodyCenter, bodySize, bodyDepthCenter);
+        Vector3 rightHip = JointToAvatarWorld(rightHipJoint, bodyCenter, bodySize, bodyDepthCenter);
+        Vector3 leftKnee = JointToAvatarWorld(leftKneeJoint, bodyCenter, bodySize, bodyDepthCenter);
+        Vector3 rightKnee = JointToAvatarWorld(rightKneeJoint, bodyCenter, bodySize, bodyDepthCenter);
+        Vector3 leftAnkle = JointToAvatarWorld(leftAnkleJoint, bodyCenter, bodySize, bodyDepthCenter);
+        Vector3 rightAnkle = JointToAvatarWorld(rightAnkleJoint, bodyCenter, bodySize, bodyDepthCenter);
 
-        Vector3 nose = JointToAvatarWorld(player.joints.nose, bodyCenter, bodySize);
+        Vector3 nose = JointToAvatarWorld(player.joints.nose, bodyCenter, bodySize, bodyDepthCenter);
         Vector3 shoulderCenter = (leftShoulder + rightShoulder) * 0.5f;
 
-        RotateBoneToward(leftUpperArmBone, leftUpperArmAimAxis, leftElbow - leftShoulder, armRotationWeight, upperArmAxisOffset);
-        RotateBoneToward(leftLowerArmBone, leftLowerArmAimAxis, leftWrist - leftElbow, armRotationWeight, lowerArmAxisOffset);
-        RotateBoneToward(rightUpperArmBone, rightUpperArmAimAxis, rightElbow - rightShoulder, armRotationWeight, upperArmAxisOffset);
-        RotateBoneToward(rightLowerArmBone, rightLowerArmAimAxis, rightWrist - rightElbow, armRotationWeight, lowerArmAxisOffset);
+        bool armIkActive = handWeight > 0.01f;
+        bool legIkActive = footWeight > 0.01f;
 
-        RotateBoneToward(leftUpperLegBone, leftUpperLegAimAxis, leftKnee - leftHip, legRotationWeight, upperLegAxisOffset);
-        RotateBoneToward(leftLowerLegBone, leftLowerLegAimAxis, leftAnkle - leftKnee, legRotationWeight, lowerLegAxisOffset);
-        RotateBoneToward(rightUpperLegBone, rightUpperLegAimAxis, rightKnee - rightHip, legRotationWeight, upperLegAxisOffset);
-        RotateBoneToward(rightLowerLegBone, rightLowerLegAimAxis, rightAnkle - rightKnee, legRotationWeight, lowerLegAxisOffset);
+        if (blendBoneRotationsWithIK || !armIkActive)
+        {
+            RotateBoneToward(leftUpperArmBone, leftUpperArmAimAxis, leftElbow - leftShoulder, armRotationWeight, upperArmAxisOffset, leftUpperArmRestLocalRotation);
+            RotateBoneToward(leftLowerArmBone, leftLowerArmAimAxis, leftWrist - leftElbow, armRotationWeight, lowerArmAxisOffset, leftLowerArmRestLocalRotation);
+            RotateBoneToward(rightUpperArmBone, rightUpperArmAimAxis, rightElbow - rightShoulder, armRotationWeight, upperArmAxisOffset, rightUpperArmRestLocalRotation);
+            RotateBoneToward(rightLowerArmBone, rightLowerArmAimAxis, rightWrist - rightElbow, armRotationWeight, lowerArmAxisOffset, rightLowerArmRestLocalRotation);
+        }
 
-        RotateBoneToward(headBone, headAimAxis, nose - shoulderCenter, headRotationWeight, headAxisOffset);
+        if (blendBoneRotationsWithIK || !legIkActive)
+        {
+            RotateBoneToward(leftUpperLegBone, leftUpperLegAimAxis, leftKnee - leftHip, legRotationWeight, upperLegAxisOffset, leftUpperLegRestLocalRotation);
+            RotateBoneToward(leftLowerLegBone, leftLowerLegAimAxis, leftAnkle - leftKnee, legRotationWeight, lowerLegAxisOffset, leftLowerLegRestLocalRotation);
+            RotateBoneToward(rightUpperLegBone, rightUpperLegAimAxis, rightKnee - rightHip, legRotationWeight, upperLegAxisOffset, rightUpperLegRestLocalRotation);
+            RotateBoneToward(rightLowerLegBone, rightLowerLegAimAxis, rightAnkle - rightKnee, legRotationWeight, lowerLegAxisOffset, rightLowerLegRestLocalRotation);
+        }
+
+        RotateBoneToward(headBone, headAimAxis, nose - shoulderCenter, headRotationWeight, headAxisOffset, headRestLocalRotation);
+    }
+
+    private bool TryApplyBoneRotationsFromPacketVectors(PlayerPose player)
+    {
+        if (player == null || player.bones == null)
+        {
+            return false;
+        }
+
+        BoneVector leftUpperArm = swapLeftRight ? player.bones.right_upper_arm : player.bones.left_upper_arm;
+        BoneVector leftLowerArm = swapLeftRight ? player.bones.right_lower_arm : player.bones.left_lower_arm;
+        BoneVector rightUpperArm = swapLeftRight ? player.bones.left_upper_arm : player.bones.right_upper_arm;
+        BoneVector rightLowerArm = swapLeftRight ? player.bones.left_lower_arm : player.bones.right_lower_arm;
+
+        BoneVector leftUpperLeg = swapLeftRight ? player.bones.right_upper_leg : player.bones.left_upper_leg;
+        BoneVector leftLowerLeg = swapLeftRight ? player.bones.right_lower_leg : player.bones.left_lower_leg;
+        BoneVector rightUpperLeg = swapLeftRight ? player.bones.left_upper_leg : player.bones.right_upper_leg;
+        BoneVector rightLowerLeg = swapLeftRight ? player.bones.left_lower_leg : player.bones.right_lower_leg;
+
+        Vector3 leftUpperArmDirection = BoneVectorToWorldDirection(leftUpperArm);
+        Vector3 leftLowerArmDirection = BoneVectorToWorldDirection(leftLowerArm);
+        Vector3 rightUpperArmDirection = BoneVectorToWorldDirection(rightUpperArm);
+        Vector3 rightLowerArmDirection = BoneVectorToWorldDirection(rightLowerArm);
+
+        Vector3 leftUpperLegDirection = BoneVectorToWorldDirection(leftUpperLeg);
+        Vector3 leftLowerLegDirection = BoneVectorToWorldDirection(leftLowerLeg);
+        Vector3 rightUpperLegDirection = BoneVectorToWorldDirection(rightUpperLeg);
+        Vector3 rightLowerLegDirection = BoneVectorToWorldDirection(rightLowerLeg);
+        Vector3 headDirection = BoneVectorToWorldDirection(player.bones.head);
+
+        bool armIkActive = handWeight > 0.01f;
+        bool legIkActive = footWeight > 0.01f;
+        bool appliedAny = false;
+
+        if (blendBoneRotationsWithIK || !armIkActive)
+        {
+            appliedAny |= TryRotateFromDirection(leftUpperArmBone, leftUpperArmAimAxis, leftUpperArmDirection, armRotationWeight, upperArmAxisOffset, leftUpperArmRestLocalRotation);
+            appliedAny |= TryRotateFromDirection(leftLowerArmBone, leftLowerArmAimAxis, leftLowerArmDirection, armRotationWeight, lowerArmAxisOffset, leftLowerArmRestLocalRotation);
+            appliedAny |= TryRotateFromDirection(rightUpperArmBone, rightUpperArmAimAxis, rightUpperArmDirection, armRotationWeight, upperArmAxisOffset, rightUpperArmRestLocalRotation);
+            appliedAny |= TryRotateFromDirection(rightLowerArmBone, rightLowerArmAimAxis, rightLowerArmDirection, armRotationWeight, lowerArmAxisOffset, rightLowerArmRestLocalRotation);
+        }
+
+        if (blendBoneRotationsWithIK || !legIkActive)
+        {
+            appliedAny |= TryRotateFromDirection(leftUpperLegBone, leftUpperLegAimAxis, leftUpperLegDirection, legRotationWeight, upperLegAxisOffset, leftUpperLegRestLocalRotation);
+            appliedAny |= TryRotateFromDirection(leftLowerLegBone, leftLowerLegAimAxis, leftLowerLegDirection, legRotationWeight, lowerLegAxisOffset, leftLowerLegRestLocalRotation);
+            appliedAny |= TryRotateFromDirection(rightUpperLegBone, rightUpperLegAimAxis, rightUpperLegDirection, legRotationWeight, upperLegAxisOffset, rightUpperLegRestLocalRotation);
+            appliedAny |= TryRotateFromDirection(rightLowerLegBone, rightLowerLegAimAxis, rightLowerLegDirection, legRotationWeight, lowerLegAxisOffset, rightLowerLegRestLocalRotation);
+        }
+
+        appliedAny |= TryRotateFromDirection(headBone, headAimAxis, headDirection, headRotationWeight, headAxisOffset, headRestLocalRotation);
+        return appliedAny;
+    }
+
+    private bool TryRotateFromDirection(
+        Transform bone,
+        Vector3 aimAxis,
+        Vector3 direction,
+        float weight,
+        Vector3 axisOffset,
+        Quaternion restLocalRotation
+    )
+    {
+        if (direction.sqrMagnitude < 0.0001f)
+        {
+            return false;
+        }
+
+        RotateBoneToward(bone, aimAxis, direction, weight, axisOffset, restLocalRotation);
+        return true;
+    }
+
+    private Vector3 BoneVectorToWorldDirection(BoneVector boneVector)
+    {
+        if (boneVector == null || boneVector.confidence < minBoneVectorConfidence)
+        {
+            return Vector3.zero;
+        }
+
+        Vector3 localDirection = new Vector3(
+            boneVector.x,
+            -boneVector.y,
+            -boneVector.z
+        );
+
+        if (mirrorX)
+        {
+            localDirection.x = -localDirection.x;
+        }
+
+        if (localDirection.sqrMagnitude < 0.000001f)
+        {
+            return Vector3.zero;
+        }
+
+        return transform.TransformDirection(localDirection.normalized);
+    }
+
+    private void DisableConflictingDrivers()
+    {
+        MediaPipeHumanoidAvatar[] avatarDrivers = FindObjectsByType<MediaPipeHumanoidAvatar>(
+            FindObjectsInactive.Include,
+            FindObjectsSortMode.None
+        );
+
+        foreach (MediaPipeHumanoidAvatar driver in avatarDrivers)
+        {
+            if (driver == null || !driver.enabled)
+            {
+                continue;
+            }
+
+            Animator driverAnimator = driver.animator != null ? driver.animator : driver.GetComponent<Animator>();
+
+            if (driverAnimator == animator)
+            {
+                driver.enabled = false;
+                Debug.LogWarning("MediaPipeHumanoidIK: Disabled conflicting MediaPipeHumanoidAvatar on " + driver.gameObject.name + ".");
+            }
+        }
+
+        IKSelfTest[] ikTests = FindObjectsByType<IKSelfTest>(
+            FindObjectsInactive.Include,
+            FindObjectsSortMode.None
+        );
+
+        foreach (IKSelfTest test in ikTests)
+        {
+            if (test == null || !test.enabled)
+            {
+                continue;
+            }
+
+            Animator testAnimator = test.animator != null ? test.animator : test.GetComponent<Animator>();
+
+            if (testAnimator == animator)
+            {
+                test.enabled = false;
+                Debug.LogWarning("MediaPipeHumanoidIK: Disabled conflicting IKSelfTest on " + test.gameObject.name + ".");
+            }
+        }
     }
 
     private void CacheBoneAimAxes()
@@ -517,6 +702,31 @@ public class MediaPipeHumanoidIK : MonoBehaviour
 
         leftLowerLegAimAxis = ComputeAimAxis(leftLowerLegBone, leftFootBone, leftLowerLegAimAxis);
         rightLowerLegAimAxis = ComputeAimAxis(rightLowerLegBone, rightFootBone, rightLowerLegAimAxis);
+    }
+
+    private void CacheRestLocalRotations()
+    {
+        headRestLocalRotation = GetLocalRotationOrIdentity(headBone);
+
+        leftUpperArmRestLocalRotation = GetLocalRotationOrIdentity(leftUpperArmBone);
+        leftLowerArmRestLocalRotation = GetLocalRotationOrIdentity(leftLowerArmBone);
+        rightUpperArmRestLocalRotation = GetLocalRotationOrIdentity(rightUpperArmBone);
+        rightLowerArmRestLocalRotation = GetLocalRotationOrIdentity(rightLowerArmBone);
+
+        leftUpperLegRestLocalRotation = GetLocalRotationOrIdentity(leftUpperLegBone);
+        leftLowerLegRestLocalRotation = GetLocalRotationOrIdentity(leftLowerLegBone);
+        rightUpperLegRestLocalRotation = GetLocalRotationOrIdentity(rightUpperLegBone);
+        rightLowerLegRestLocalRotation = GetLocalRotationOrIdentity(rightLowerLegBone);
+    }
+
+    private Quaternion GetLocalRotationOrIdentity(Transform bone)
+    {
+        if (bone == null)
+        {
+            return Quaternion.identity;
+        }
+
+        return bone.localRotation;
     }
 
     private Vector3 ComputeAimAxis(Transform bone, Transform childBone, Vector3 fallbackAxis)
@@ -543,7 +753,14 @@ public class MediaPipeHumanoidIK : MonoBehaviour
         return localDirection.normalized;
     }
 
-    private void RotateBoneToward(Transform bone, Vector3 aimAxis, Vector3 direction, float weight, Vector3 axisOffset)
+    private void RotateBoneToward(
+        Transform bone,
+        Vector3 aimAxis,
+        Vector3 direction,
+        float weight,
+        Vector3 axisOffset,
+        Quaternion restLocalRotation
+    )
     {
         if (bone == null || weight <= 0.0f)
         {
@@ -555,13 +772,26 @@ public class MediaPipeHumanoidIK : MonoBehaviour
             return;
         }
 
-        Vector3 currentAimWorld = bone.TransformDirection(aimAxis.normalized);
-        Quaternion deltaRotation = Quaternion.FromToRotation(currentAimWorld, direction.normalized);
-        Quaternion adjustedRotation = deltaRotation * bone.rotation * Quaternion.Euler(axisOffset);
+        Transform parent = bone.parent;
 
-        bone.rotation = Quaternion.Slerp(
-            bone.rotation,
-            adjustedRotation,
+        if (parent == null)
+        {
+            return;
+        }
+
+        Vector3 targetLocalDirection = Quaternion.Inverse(parent.rotation) * direction.normalized;
+
+        if (targetLocalDirection.sqrMagnitude < 0.000001f)
+        {
+            return;
+        }
+
+        Quaternion alignLocal = Quaternion.FromToRotation(aimAxis.normalized, targetLocalDirection.normalized);
+        Quaternion desiredLocalRotation = alignLocal * restLocalRotation * Quaternion.Euler(axisOffset);
+
+        bone.localRotation = Quaternion.Slerp(
+            bone.localRotation,
+            desiredLocalRotation,
             Time.deltaTime * boneRotationSmoothing * weight
         );
     }
@@ -601,6 +831,13 @@ public class MediaPipeHumanoidIK : MonoBehaviour
 
         animator.SetLookAtWeight(lookWeight);
         animator.SetLookAtPosition(headTarget);
+
+        if (!driveBoneRotations || latestPacket == null || latestPlayer == null)
+        {
+            return;
+        }
+
+        ApplyBoneRotations(latestPacket, latestPlayer);
     }
 
     private void ValidateBoneBindings()

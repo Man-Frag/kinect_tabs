@@ -90,3 +90,18 @@ python playback_recording.py recording.json --udp-host 127.0.0.1 --udp-port 5052
 - Press `q` in any OpenCV window to stop live tracking or playback.
 - In `record_tracking.py`, press `r` to start or stop a recording segment.
 - The live tracking script remains the original UDP-sending entry point.
+
+## Packet Schema (UDP + JSON)
+
+Each player now includes:
+
+- `joints`: absolute landmark points (`x`, `y`, `z`, `visibility`)
+- `bones`: normalized direction vectors (`x`, `y`, `z`, `confidence`) that are scale-invariant
+
+The `bones` keys are:
+
+- `left_upper_arm`, `left_lower_arm`, `right_upper_arm`, `right_lower_arm`
+- `left_upper_leg`, `left_lower_leg`, `right_upper_leg`, `right_lower_leg`
+- `head`
+
+Unity can use `bones` directly for rotation driving, which is more robust across different person sizes and camera distances.

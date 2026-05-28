@@ -36,3 +36,38 @@ kinect-tabs/.idea/
 kinect-tabs/.gradle/
 kinect-tabs/.DS_Store
 kinect-tabs/Thumbs.db
+
+# Unity project ignores (scoped to pipe-test/)
+pipe-test/[Ll]ibrary/
+pipe-test/[Tt]emp/
+pipe-test/[Oo]bj/
+pipe-test/[Bb]uild/
+pipe-test/[Bb]uilds/
+pipe-test/[Ll]ogs/
+pipe-test/[Uu]ser[Ss]ettings/
+pipe-test/[Mm]emoryCaptures/
+pipe-test/[Rr]ecordings/
+
+# Generated IDE/project files
+pipe-test/*.csproj
+pipe-test/*.unityproj
+pipe-test/*.sln
+pipe-test/*.slnx
+pipe-test/*.suo
+pipe-test/*.user
+pipe-test/*.userprefs
+pipe-test/*.pidb
+pipe-test/*.booproj
+pipe-test/*.svd
+pipe-test/*.pdb
+pipe-test/*.mdb
+pipe-test/*.opendb
+pipe-test/*.VC.db
+
+# Unity generated metadata and diagnostics
+pipe-test/sysinfo.txt
+pipe-test/.vs/
+pipe-test/.idea/
+pipe-test/.gradle/
+pipe-test/.DS_Store
+pipe-test/Thumbs.db
