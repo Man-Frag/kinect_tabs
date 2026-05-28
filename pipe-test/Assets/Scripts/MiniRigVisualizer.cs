@@ -19,6 +19,14 @@ public class MiniRigVisualizer : MonoBehaviour
     public float forwardOffset = 0.4f;
     public float bodyYOffset = 1.0f;
 
+    [Header("Calibration")]
+    public bool useCalibration = true;
+    public KeyCode startCalibrationKey = KeyCode.C;
+    public KeyCode capturePoseKey = KeyCode.Space;
+    public KeyCode alternateCapturePoseKey = KeyCode.Return;
+    public KeyCode resetCalibrationKey = KeyCode.R;
+    public bool requirePoseValidation = false;
+
     [Header("Rig Look")]
     public float jointSize = 0.06f;
     public float boneRadius = 0.03f;
@@ -68,8 +76,28 @@ public class MiniRigVisualizer : MonoBehaviour
     private Material jointMaterial;
     private Material boneMaterial;
 
+    private GUIStyle calibrationHeaderStyle;
+    private GUIStyle calibrationBodyStyle;
+    private GUIStyle calibrationBadgeStyle;
+
+    private const int CalibrationPoseCount = 4;
+    private readonly CalibrationSnapshot[] calibrationSnapshots = new CalibrationSnapshot[CalibrationPoseCount];
+
+    private bool calibrationComplete;
+    private bool calibrationRunning;
+    private int calibrationStage = -1;
+
+    private static readonly string[] CalibrationPoseNames =
+    {
+        "Pose 1/4: stand straight, arms and legs closed.",
+        "Pose 2/4: T-pose with legs closed.",
+        "Pose 3/4: T-pose with legs open (A-stance lower body).",
+        "Pose 4/4: legs open, arms straight all the way up.",
+    };
+
     private void OnEnable()
     {
+        calibrationComplete = !useCalibration;
         BuildDefaultPose();
         EnsureRig();
         ApplyDefaultPose();
@@ -77,6 +105,13 @@ public class MiniRigVisualizer : MonoBehaviour
 
     private void OnValidate()
     {
+        if (!useCalibration)
+        {
+            calibrationComplete = true;
+            calibrationRunning = false;
+            calibrationStage = -1;
+        }
+
         BuildDefaultPose();
         EnsureRig();
         ApplyDefaultPose();
@@ -111,6 +146,8 @@ public class MiniRigVisualizer : MonoBehaviour
             return;
         }
 
+        HandleCalibrationInput(player);
+
         Vector2 bodyCenter = GetBodyCenter(player);
         float bodySize = GetBodySize(player);
         float bodyDepthCenter = GetBodyDepthCenter(player);
@@ -134,6 +171,300 @@ public class MiniRigVisualizer : MonoBehaviour
         }
 
         UpdateBones();
+    }
+
+    private void HandleCalibrationInput(PlayerPose player)
+    {
+        if (!useCalibration || player == null || player.joints == null)
+        {
+            return;
+        }
+
+        if (Input.GetKeyDown(resetCalibrationKey))
+        {
+            StartCalibration();
+            Debug.Log("MiniRig calibration reset.");
+            return;
+        }
+
+        if (!calibrationRunning && Input.GetKeyDown(startCalibrationKey))
+        {
+            StartCalibration();
+            Debug.Log("MiniRig calibration started. " + CalibrationPoseNames[0]);
+            return;
+        }
+
+        if (calibrationRunning && (Input.GetKeyDown(capturePoseKey) || Input.GetKeyDown(alternateCapturePoseKey)))
+        {
+            TryCaptureCalibrationPose(player);
+        }
+    }
+
+    private void StartCalibration()
+    {
+        for (int i = 0; i < calibrationSnapshots.Length; i++)
+        {
+            calibrationSnapshots[i] = default;
+        }
+
+        calibrationRunning = true;
+        calibrationComplete = false;
+        calibrationStage = 0;
+    }
+
+    private void TryCaptureCalibrationPose(PlayerPose player)
+    {
+        if (calibrationStage < 0 || calibrationStage >= CalibrationPoseCount)
+        {
+            return;
+        }
+
+        bool poseIsValid = ValidateCalibrationPose(player, calibrationStage);
+
+        if (requirePoseValidation && !poseIsValid)
+        {
+            Debug.LogWarning("MiniRig calibration pose check failed. Please match: " + CalibrationPoseNames[calibrationStage]);
+            return;
+        }
+
+        if (!poseIsValid)
+        {
+            Debug.LogWarning(
+                "MiniRig calibration captured without strict pose validation at step " + (calibrationStage + 1) +
+                ". Enable requirePoseValidation if you want hard checks."
+            );
+        }
+
+        calibrationSnapshots[calibrationStage] = BuildSnapshot(player);
+        calibrationStage++;
+
+        if (calibrationStage >= CalibrationPoseCount)
+        {
+            FinishCalibration();
+            return;
+        }
+
+        Debug.Log("MiniRig calibration captured. Next: " + CalibrationPoseNames[calibrationStage]);
+    }
+
+    private void FinishCalibration()
+    {
+        CalibrationSnapshot tPoseClosed = calibrationSnapshots[1];
+        CalibrationSnapshot tPoseOpenLegs = calibrationSnapshots[2];
+        CalibrationSnapshot armsUpOpenLegs = calibrationSnapshots[3];
+
+        float armSpanNorm = SafeRatio(tPoseClosed.WristDistance, tPoseClosed.TorsoHeight);
+        float legSpreadNorm = SafeRatio(tPoseOpenLegs.AnkleDistance, tPoseOpenLegs.TorsoHeight);
+        float armLiftNorm = SafeRatio(armsUpOpenLegs.ShoulderCenterY - armsUpOpenLegs.WristCenterY, armsUpOpenLegs.TorsoHeight);
+
+        const float targetArmSpanNorm = 1.75f;
+        const float targetLegSpreadNorm = 0.85f;
+        const float targetArmLiftNorm = 0.85f;
+
+        float armBasedHorizontal = SafeRatio(targetArmSpanNorm, armSpanNorm);
+        float legBasedHorizontal = SafeRatio(targetLegSpreadNorm, legSpreadNorm);
+
+        horizontalMotionGain = Mathf.Clamp((armBasedHorizontal + legBasedHorizontal) * 0.5f, 0.5f, 3.0f);
+        verticalMotionGain = Mathf.Clamp(SafeRatio(targetArmLiftNorm, armLiftNorm), 0.5f, 3.0f);
+
+        calibrationRunning = false;
+        calibrationComplete = true;
+        calibrationStage = -1;
+
+        Debug.Log(
+            "MiniRig calibration complete. Gains -> " +
+            "X: " + horizontalMotionGain.ToString("F2") +
+            ", Y: " + verticalMotionGain.ToString("F2") +
+            ", Z: " + depthMotionGain.ToString("F2")
+        );
+    }
+
+    private static float SafeRatio(float numerator, float denominator)
+    {
+        if (Mathf.Abs(denominator) < 0.0001f)
+        {
+            return 1.0f;
+        }
+
+        return numerator / denominator;
+    }
+
+    private CalibrationSnapshot BuildSnapshot(PlayerPose player)
+    {
+        JointCollection j = player.joints;
+
+        Vector2 leftShoulder = new Vector2(j.left_shoulder.x, j.left_shoulder.y);
+        Vector2 rightShoulder = new Vector2(j.right_shoulder.x, j.right_shoulder.y);
+        Vector2 leftHip = new Vector2(j.left_hip.x, j.left_hip.y);
+        Vector2 rightHip = new Vector2(j.right_hip.x, j.right_hip.y);
+
+        Vector2 shoulderCenter = (leftShoulder + rightShoulder) * 0.5f;
+        Vector2 hipCenter = (leftHip + rightHip) * 0.5f;
+        float torsoHeight = Mathf.Max(Vector2.Distance(shoulderCenter, hipCenter), 0.0001f);
+
+        Vector2 leftWrist = new Vector2(j.left_wrist.x, j.left_wrist.y);
+        Vector2 rightWrist = new Vector2(j.right_wrist.x, j.right_wrist.y);
+        Vector2 leftAnkle = new Vector2(j.left_ankle.x, j.left_ankle.y);
+        Vector2 rightAnkle = new Vector2(j.right_ankle.x, j.right_ankle.y);
+
+        return new CalibrationSnapshot
+        {
+            TorsoHeight = torsoHeight,
+            WristDistance = Vector2.Distance(leftWrist, rightWrist),
+            AnkleDistance = Vector2.Distance(leftAnkle, rightAnkle),
+            ShoulderCenterY = shoulderCenter.y,
+            WristCenterY = (leftWrist.y + rightWrist.y) * 0.5f,
+            LeftWristY = leftWrist.y,
+            RightWristY = rightWrist.y,
+            LeftShoulderY = leftShoulder.y,
+            RightShoulderY = rightShoulder.y,
+            NoseY = j.nose != null ? j.nose.y : shoulderCenter.y,
+        };
+    }
+
+    private bool ValidateCalibrationPose(PlayerPose player, int stage)
+    {
+        CalibrationSnapshot s = BuildSnapshot(player);
+
+        float wristSpanNorm = SafeRatio(s.WristDistance, s.TorsoHeight);
+        float ankleSpanNorm = SafeRatio(s.AnkleDistance, s.TorsoHeight);
+        float wristsShoulderYOffset = Mathf.Abs(s.WristCenterY - s.ShoulderCenterY) / s.TorsoHeight;
+        float wristsAboveShoulders = SafeRatio(s.ShoulderCenterY - s.WristCenterY, s.TorsoHeight);
+
+        switch (stage)
+        {
+            case 0:
+                return wristSpanNorm < 0.65f && ankleSpanNorm < 0.35f;
+            case 1:
+                return wristSpanNorm > 1.30f && ankleSpanNorm < 0.45f && wristsShoulderYOffset < 0.35f;
+            case 2:
+                return wristSpanNorm > 1.30f && ankleSpanNorm > 0.60f && wristsShoulderYOffset < 0.35f;
+            case 3:
+                return ankleSpanNorm > 0.60f && wristsAboveShoulders > 0.55f && s.WristCenterY < s.NoseY;
+            default:
+                return false;
+        }
+    }
+
+    private void OnGUI()
+    {
+        if (!Application.isPlaying || !useCalibration)
+        {
+            return;
+        }
+
+        EnsureCalibrationGuiStyles();
+
+        float panelWidth = Mathf.Min(Screen.width - 24f, 1220f);
+        Rect panelRect = new Rect(12f, 12f, panelWidth, 130f);
+        Rect headerRect = new Rect(panelRect.x + 12f, panelRect.y + 10f, panelRect.width - 24f, 44f);
+        Rect bodyRect = new Rect(panelRect.x + 12f, panelRect.y + 58f, panelRect.width - 24f, 62f);
+        Rect badgeRect = new Rect(panelRect.x + panelRect.width - 220f, panelRect.y + 8f, 200f, 34f);
+
+        string header;
+        string body;
+        Color stageColor;
+        string badge;
+
+        if (calibrationRunning && calibrationStage >= 0 && calibrationStage < CalibrationPoseNames.Length)
+        {
+            header = "CALIBRATION RUNNING";
+            body = CalibrationPoseNames[calibrationStage] +
+                   "  Capture: " + capturePoseKey + " / " + alternateCapturePoseKey +
+                   "   Reset: " + resetCalibrationKey;
+            stageColor = GetCalibrationStageColor(calibrationStage);
+            badge = "STEP " + (calibrationStage + 1) + " / " + CalibrationPoseCount;
+        }
+        else if (!calibrationComplete)
+        {
+            header = "CALIBRATION PENDING";
+            body = "Press " + startCalibrationKey + " to start 4-step calibration. Capture each pose with " +
+                   capturePoseKey + " or " + alternateCapturePoseKey + ".";
+            stageColor = new Color(1.0f, 0.64f, 0.0f, 0.95f);
+            badge = "READY";
+        }
+        else
+        {
+            header = "CALIBRATION COMPLETE";
+            body = "Gains  X=" + horizontalMotionGain.ToString("F2") +
+                   "  Y=" + verticalMotionGain.ToString("F2") +
+                   "  Z=" + depthMotionGain.ToString("F2") +
+                   "   Press " + resetCalibrationKey + " to recalibrate.";
+            stageColor = new Color(0.17f, 0.75f, 0.27f, 0.95f);
+            badge = "LOCKED";
+        }
+
+        DrawFilledRect(panelRect, new Color(0.05f, 0.05f, 0.05f, 0.86f));
+        DrawFilledRect(new Rect(panelRect.x, panelRect.y, panelRect.width, 6f), stageColor);
+        DrawFilledRect(badgeRect, stageColor);
+
+        GUI.Label(headerRect, header, calibrationHeaderStyle);
+        GUI.Label(bodyRect, body, calibrationBodyStyle);
+        GUI.Label(badgeRect, badge, calibrationBadgeStyle);
+    }
+
+    private void EnsureCalibrationGuiStyles()
+    {
+        if (calibrationHeaderStyle == null)
+        {
+            calibrationHeaderStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 34,
+                fontStyle = FontStyle.Bold,
+                normal = { textColor = Color.white },
+                alignment = TextAnchor.MiddleLeft,
+                wordWrap = true,
+            };
+        }
+
+        if (calibrationBodyStyle == null)
+        {
+            calibrationBodyStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 24,
+                fontStyle = FontStyle.Bold,
+                normal = { textColor = new Color(0.96f, 0.96f, 0.96f, 1f) },
+                alignment = TextAnchor.UpperLeft,
+                wordWrap = true,
+            };
+        }
+
+        if (calibrationBadgeStyle == null)
+        {
+            calibrationBadgeStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 22,
+                fontStyle = FontStyle.Bold,
+                normal = { textColor = Color.black },
+                alignment = TextAnchor.MiddleCenter,
+                wordWrap = false,
+            };
+        }
+    }
+
+    private static Color GetCalibrationStageColor(int stage)
+    {
+        switch (stage)
+        {
+            case 0:
+                return new Color(0.94f, 0.35f, 0.13f, 0.95f); // closed pose
+            case 1:
+                return new Color(0.95f, 0.72f, 0.12f, 0.95f); // T-pose
+            case 2:
+                return new Color(0.20f, 0.78f, 0.93f, 0.95f); // wide legs
+            case 3:
+                return new Color(0.67f, 0.42f, 0.93f, 0.95f); // arms up
+            default:
+                return new Color(0.75f, 0.75f, 0.75f, 0.95f);
+        }
+    }
+
+    private static void DrawFilledRect(Rect rect, Color color)
+    {
+        Color previous = GUI.color;
+        GUI.color = color;
+        GUI.DrawTexture(rect, Texture2D.whiteTexture);
+        GUI.color = previous;
     }
 
     private void EnsureRig()
@@ -419,5 +750,19 @@ public class MiniRigVisualizer : MonoBehaviour
             Start = start;
             End = end;
         }
+    }
+
+    private struct CalibrationSnapshot
+    {
+        public float TorsoHeight;
+        public float WristDistance;
+        public float AnkleDistance;
+        public float ShoulderCenterY;
+        public float WristCenterY;
+        public float LeftWristY;
+        public float RightWristY;
+        public float LeftShoulderY;
+        public float RightShoulderY;
+        public float NoseY;
     }
 }

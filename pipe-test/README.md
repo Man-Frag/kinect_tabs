@@ -40,3 +40,22 @@ python media-python/playback_recording.py right_test.json
 - Default UDP port is `5052`.
 - The mini rig uses body-size normalization, so people at different distances stay proportionally stable.
 - If left/right appears inverted, set `mirrorX` on `MiniRigVisualizer`.
+
+## 4-Pose Calibration (Play Mode)
+
+`MiniRigVisualizer` includes a guided 4-step calibration:
+
+1. Stand straight with arms and legs closed.
+2. T-pose with legs closed.
+3. T-pose with legs open (A-stance lower body).
+4. Keep legs open and raise both arms all the way up.
+
+Keys (default):
+
+- `C`: start calibration
+- `Space` or `Enter`: capture current pose step
+- `R`: reset and recalibrate
+
+By default, capture is non-blocking (`requirePoseValidation = false`) so each key press advances steps even if your pose is imperfect. Turn strict validation on in the inspector if you want enforced pose checks.
+
+During play, an on-screen box shows the current required calibration pose and current gain values after completion.
