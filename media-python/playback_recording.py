@@ -21,6 +21,7 @@ def parse_args():
 
 def playback_frames(
     frames,
+    events=None,
     speed=1.0,
     loop=False,
     mirror=False,
@@ -30,49 +31,81 @@ def playback_frames(
     if not frames:
         raise RuntimeError("Recording does not contain any frames")
 
+    # Sort once; events may originate from out-of-order appends.
+    sorted_events = sorted(events or [], key=lambda e: e["timestamp_ms"])
+    total_events = len(sorted_events)
+
     sender = UdpSender(host=udp_host, port=udp_port)
-    frame_index = 0
     speed = max(speed, 0.01)
 
     try:
         while True:
-            packet = frames[frame_index]
-            sender.send_packet(packet)
+            frame_index = 0
+            event_index = 0  # reset at the start of every loop pass
 
-            display_packet = mirror_packet(packet) if mirror else packet
-            canvas = create_canvas(packet)
-            overlay_lines = [
-                "Recording playback - press Q to quit",
-                f"Frame {frame_index + 1}/{len(frames)}",
-                f"Speed x{speed:g}",
-                f"Preview {'mirrored' if mirror else 'not mirrored'}",
-                f"UDP -> {udp_host}:{udp_port}",
-            ]
+            while True:
+                packet = frames[frame_index]
+                current_ts = packet["timestamp_ms"]
 
-            draw_packet(canvas, display_packet, header_lines=overlay_lines)
-            is_last_frame = frame_index >= len(frames) - 1
+                # Fire every key event whose timestamp has been reached by
+                # this frame.  Events are ordered so we advance a pointer
+                # rather than scanning the whole list each frame.
+                while event_index < total_events:
+                    evt = sorted_events[event_index]
+                    if evt["timestamp_ms"] > current_ts:
+                        break
+                    sender.send_key_event(
+                        evt["key"],
+                        evt.get("event", "keydown"),
+                        evt["timestamp_ms"],
+                    )
+                    event_index += 1
 
-            if is_last_frame:
-                delay_ms = 1
-            else:
-                next_timestamp = frames[frame_index + 1]["timestamp_ms"]
-                current_timestamp = packet["timestamp_ms"]
-                delta_ms = max(1, next_timestamp - current_timestamp)
-                delay_ms = max(1, int(delta_ms / speed))
+                sender.send_packet(packet)
 
-            cv2.imshow("Tracking Playback", canvas)
-            key = cv2.waitKey(delay_ms) & 0xFF
+                display_packet = mirror_packet(packet) if mirror else packet
+                canvas = create_canvas(packet)
+                overlay_lines = [
+                    "Recording playback - press Q to quit",
+                    f"Frame {frame_index + 1}/{len(frames)}",
+                    f"Speed x{speed:g}",
+                    f"Preview {'mirrored' if mirror else 'not mirrored'}",
+                    f"UDP -> {udp_host}:{udp_port}",
+                    f"Key events: {event_index}/{total_events} sent",
+                ]
 
-            if key == ord("q"):
-                break
+                draw_packet(canvas, display_packet, header_lines=overlay_lines)
+                is_last_frame = frame_index >= len(frames) - 1
 
-            if is_last_frame:
-                if not loop:
-                    break
-                frame_index = 0
-                continue
+                if is_last_frame:
+                    # Flush any events that sit beyond the last frame timestamp.
+                    while event_index < total_events:
+                        evt = sorted_events[event_index]
+                        sender.send_key_event(
+                            evt["key"],
+                            evt.get("event", "keydown"),
+                            evt["timestamp_ms"],
+                        )
+                        event_index += 1
+                    delay_ms = 1
+                else:
+                    next_timestamp = frames[frame_index + 1]["timestamp_ms"]
+                    delta_ms = max(1, next_timestamp - current_ts)
+                    delay_ms = max(1, int(delta_ms / speed))
 
-            frame_index += 1
+                cv2.imshow("Tracking Playback", canvas)
+                key = cv2.waitKey(delay_ms) & 0xFF
+
+                if key == ord("q"):
+                    return
+
+                if is_last_frame:
+                    if not loop:
+                        return
+                    break  # restart outer while with reset indices
+
+                frame_index += 1
+
     finally:
         sender.close()
         cv2.destroyAllWindows()
@@ -83,6 +116,7 @@ def main():
     recording = load_recording(args.recording)
     playback_frames(
         recording["frames"],
+        events=recording.get("events", []),
         speed=args.speed,
         loop=args.loop,
         mirror=args.mirror,

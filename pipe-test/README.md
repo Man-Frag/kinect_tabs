@@ -40,6 +40,7 @@ python media-python/playback_recording.py right_test.json
 - Default UDP port is `5052`.
 - The mini rig uses body-size normalization, so people at different distances stay proportionally stable.
 - If left/right appears inverted, set `mirrorX` on `MiniRigVisualizer`.
+- The pipe skeleton renderer is the active/default visual mode for now.
 
 ## 4-Pose Calibration (Play Mode)
 
@@ -52,10 +53,12 @@ python media-python/playback_recording.py right_test.json
 
 Keys (default):
 
-- `C`: start calibration
-- `Space` or `Enter`: capture current pose step
+- `C`: start calibration (manual mode)
+- `Space` or `Enter`: capture current pose in manual mode
+- `C` again during calibration: switch to auto mode (`5,4,3,2,1,GO` each stage)
 - `R`: reset and recalibrate
 
-By default, capture is non-blocking (`requirePoseValidation = false`) so each key press advances steps even if your pose is imperfect. Turn strict validation on in the inspector if you want enforced pose checks.
+In auto mode, each stage shows a visible countdown and plays sound cues for countdown ticks and phase transitions.
+If `requirePoseValidation = true`, a failed pose check restarts that stage (manual or auto).
 
 During play, an on-screen box shows the current required calibration pose and current gain values after completion.

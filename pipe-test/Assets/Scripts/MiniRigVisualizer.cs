@@ -24,10 +24,16 @@ public class MiniRigVisualizer : MonoBehaviour
     public KeyCode startCalibrationKey = KeyCode.C;
     public KeyCode capturePoseKey = KeyCode.Space;
     public KeyCode alternateCapturePoseKey = KeyCode.Return;
-    public KeyCode resetCalibrationKey = KeyCode.R;
     public bool requirePoseValidation = false;
+    public float calibrationCountdownSeconds = 5.0f;
+    public bool enableCalibrationSound = true;
+    public float countdownToneHz = 880.0f;
+    public float phaseToneHz = 1320.0f;
+    public float toneDurationSeconds = 0.08f;
+    public float toneVolume = 0.2f;
 
     [Header("Rig Look")]
+    public bool showSkeleton = true;
     public float jointSize = 0.06f;
     public float boneRadius = 0.03f;
     public float smoothing = 18.0f;
@@ -80,24 +86,31 @@ public class MiniRigVisualizer : MonoBehaviour
     private GUIStyle calibrationBodyStyle;
     private GUIStyle calibrationBadgeStyle;
 
-    private const int CalibrationPoseCount = 4;
+    private const int CalibrationPoseCount = 5;
     private readonly CalibrationSnapshot[] calibrationSnapshots = new CalibrationSnapshot[CalibrationPoseCount];
 
     private bool calibrationComplete;
     private bool calibrationRunning;
+    private bool autoCalibrationMode;
     private int calibrationStage = -1;
+    private float calibrationCountdownRemaining;
+    private int countdownLastTick = -1;
+
+    private AudioSource calibrationAudioSource;
 
     private static readonly string[] CalibrationPoseNames =
     {
-        "Pose 1/4: stand straight, arms and legs closed.",
-        "Pose 2/4: T-pose with legs closed.",
-        "Pose 3/4: T-pose with legs open (A-stance lower body).",
-        "Pose 4/4: legs open, arms straight all the way up.",
+        "Pose 1/5: stand straight, arms and legs closed.",
+        "Pose 2/5: arms straight forward toward camera (like T-pose but hands pointing at lens), legs closed.",
+        "Pose 3/5: T-pose with legs closed.",
+        "Pose 4/5: T-pose with legs open (A-stance lower body).",
+        "Pose 5/5: legs open, arms straight all the way up.",
     };
 
     private void OnEnable()
     {
         calibrationComplete = !useCalibration;
+        EnsureCalibrationAudioSource();
         BuildDefaultPose();
         EnsureRig();
         ApplyDefaultPose();
@@ -109,6 +122,7 @@ public class MiniRigVisualizer : MonoBehaviour
         {
             calibrationComplete = true;
             calibrationRunning = false;
+            autoCalibrationMode = false;
             calibrationStage = -1;
         }
 
@@ -146,6 +160,18 @@ public class MiniRigVisualizer : MonoBehaviour
             return;
         }
 
+        // Drain UDP key events (from recording playback or live Python keystrokes)
+        // before processing physical keys, so both sources drive calibration
+        // identically and recordings replay correctly.
+        KeyPacket keyEvent;
+        while (receiver.TryDequeueKeyEvent(out keyEvent))
+        {
+            if (string.IsNullOrEmpty(keyEvent.@event) || keyEvent.@event == "keydown")
+            {
+                HandleUdpKeyDown(keyEvent.key, player);
+            }
+        }
+
         HandleCalibrationInput(player);
 
         Vector2 bodyCenter = GetBodyCenter(player);
@@ -180,24 +206,91 @@ public class MiniRigVisualizer : MonoBehaviour
             return;
         }
 
-        if (Input.GetKeyDown(resetCalibrationKey))
-        {
-            StartCalibration();
-            Debug.Log("MiniRig calibration reset.");
-            return;
-        }
-
         if (!calibrationRunning && Input.GetKeyDown(startCalibrationKey))
         {
             StartCalibration();
-            Debug.Log("MiniRig calibration started. " + CalibrationPoseNames[0]);
+            Debug.Log("MiniRig calibration started in MANUAL mode. " + CalibrationPoseNames[0]);
             return;
         }
 
-        if (calibrationRunning && (Input.GetKeyDown(capturePoseKey) || Input.GetKeyDown(alternateCapturePoseKey)))
+        if (calibrationRunning)
         {
-            TryCaptureCalibrationPose(player);
+            if (Input.GetKeyDown(startCalibrationKey) && !autoCalibrationMode)
+            {
+                autoCalibrationMode = true;
+                ResetAutoCountdown();
+                PlayPhaseTone();
+                Debug.Log("MiniRig calibration switched to AUTO mode.");
+                return;
+            }
+
+            if (autoCalibrationMode)
+            {
+                UpdateCalibrationCountdown(player);
+                return;
+            }
+
+            if (Input.GetKeyDown(capturePoseKey) || Input.GetKeyDown(alternateCapturePoseKey))
+            {
+                TryCaptureCalibrationPose(player);
+            }
         }
+    }
+
+    /// <summary>
+    /// Handles a single keydown received over UDP.  Mirrors the same logic as
+    /// <see cref="HandleCalibrationInput"/> so that recording playback and live
+    /// Python keystrokes drive calibration identically to physical key presses.
+    /// </summary>
+    private void HandleUdpKeyDown(string key, PlayerPose player)
+    {
+        if (!useCalibration || player == null || player.joints == null)
+        {
+            return;
+        }
+
+        if (!calibrationRunning && UdpKeyMatchesKeyCode(key, startCalibrationKey))
+        {
+            StartCalibration();
+            Debug.Log("MiniRig calibration started via UDP key. " + CalibrationPoseNames[0]);
+            return;
+        }
+
+        if (calibrationRunning)
+        {
+            if (UdpKeyMatchesKeyCode(key, startCalibrationKey) && !autoCalibrationMode)
+            {
+                autoCalibrationMode = true;
+                ResetAutoCountdown();
+                PlayPhaseTone();
+                Debug.Log("MiniRig calibration switched to AUTO via UDP key.");
+                return;
+            }
+
+            // Auto mode advances on its own timer; manual mode captures on
+            // Space / Return, same as physical keys.
+            if (!autoCalibrationMode &&
+                (UdpKeyMatchesKeyCode(key, capturePoseKey) || UdpKeyMatchesKeyCode(key, alternateCapturePoseKey)))
+            {
+                TryCaptureCalibrationPose(player);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns true when the UDP key name (e.g. "c", "space", "return")
+    /// matches the given Unity KeyCode, case-insensitively.
+    /// Unity's KeyCode.ToString() produces names like "C", "Space", "Return"
+    /// which match the names emitted by the Python _key_name() helper.
+    /// </summary>
+    private static bool UdpKeyMatchesKeyCode(string udpKey, KeyCode keyCode)
+    {
+        if (string.IsNullOrEmpty(udpKey))
+        {
+            return false;
+        }
+
+        return string.Equals(udpKey, keyCode.ToString(), System.StringComparison.OrdinalIgnoreCase);
     }
 
     private void StartCalibration()
@@ -209,14 +302,54 @@ public class MiniRigVisualizer : MonoBehaviour
 
         calibrationRunning = true;
         calibrationComplete = false;
+        autoCalibrationMode = false;
         calibrationStage = 0;
+        ResetAutoCountdown();
     }
 
-    private void TryCaptureCalibrationPose(PlayerPose player)
+    private void ResetAutoCountdown()
+    {
+        calibrationCountdownRemaining = Mathf.Max(1.0f, calibrationCountdownSeconds);
+        countdownLastTick = Mathf.CeilToInt(calibrationCountdownRemaining) + 1;
+    }
+
+    private void UpdateCalibrationCountdown(PlayerPose player)
     {
         if (calibrationStage < 0 || calibrationStage >= CalibrationPoseCount)
         {
             return;
+        }
+
+        calibrationCountdownRemaining -= Time.deltaTime;
+
+        int currentTick = Mathf.CeilToInt(Mathf.Max(0.0f, calibrationCountdownRemaining));
+
+        if (currentTick > 0 && currentTick != countdownLastTick)
+        {
+            PlayCountdownTone();
+            countdownLastTick = currentTick;
+        }
+
+        if (calibrationCountdownRemaining > 0.0f)
+        {
+            return;
+        }
+
+        PlayPhaseTone();
+
+        bool captured = TryCaptureCalibrationPose(player);
+
+        if (!captured)
+        {
+            ResetAutoCountdown();
+        }
+    }
+
+    private bool TryCaptureCalibrationPose(PlayerPose player)
+    {
+        if (calibrationStage < 0 || calibrationStage >= CalibrationPoseCount)
+        {
+            return false;
         }
 
         bool poseIsValid = ValidateCalibrationPose(player, calibrationStage);
@@ -224,7 +357,7 @@ public class MiniRigVisualizer : MonoBehaviour
         if (requirePoseValidation && !poseIsValid)
         {
             Debug.LogWarning("MiniRig calibration pose check failed. Please match: " + CalibrationPoseNames[calibrationStage]);
-            return;
+            return false;
         }
 
         if (!poseIsValid)
@@ -241,35 +374,91 @@ public class MiniRigVisualizer : MonoBehaviour
         if (calibrationStage >= CalibrationPoseCount)
         {
             FinishCalibration();
-            return;
+            return true;
         }
 
+        if (autoCalibrationMode)
+        {
+            ResetAutoCountdown();
+        }
+
+        PlayPhaseTone();
         Debug.Log("MiniRig calibration captured. Next: " + CalibrationPoseNames[calibrationStage]);
+        return true;
     }
 
     private void FinishCalibration()
     {
-        CalibrationSnapshot tPoseClosed = calibrationSnapshots[1];
-        CalibrationSnapshot tPoseOpenLegs = calibrationSnapshots[2];
-        CalibrationSnapshot armsUpOpenLegs = calibrationSnapshots[3];
+        // Snapshot indices after the 5-pose sequence:
+        //   0 = closed pose (reference, not used for gain computation)
+        //   1 = arms forward  → depth (Z) gain
+        //   2 = T-pose closed → horizontal gain (arm span)
+        //   3 = T-pose open   → horizontal gain (leg spread)
+        //   4 = arms up open  → vertical gain
+        CalibrationSnapshot armsForward    = calibrationSnapshots[1];
+        CalibrationSnapshot tPoseClosed    = calibrationSnapshots[2];
+        CalibrationSnapshot tPoseOpenLegs  = calibrationSnapshots[3];
+        CalibrationSnapshot armsUpOpenLegs = calibrationSnapshots[4];
 
-        float armSpanNorm = SafeRatio(tPoseClosed.WristDistance, tPoseClosed.TorsoHeight);
-        float legSpreadNorm = SafeRatio(tPoseOpenLegs.AnkleDistance, tPoseOpenLegs.TorsoHeight);
-        float armLiftNorm = SafeRatio(armsUpOpenLegs.ShoulderCenterY - armsUpOpenLegs.WristCenterY, armsUpOpenLegs.TorsoHeight);
-
-        const float targetArmSpanNorm = 1.75f;
+        // --- Horizontal gain (unchanged) ---
+        float armSpanNorm   = SafeRatio(tPoseClosed.WristDistance,   tPoseClosed.TorsoHeight);
+        float legSpreadNorm = SafeRatio(tPoseOpenLegs.AnkleDistance,  tPoseOpenLegs.TorsoHeight);
+        const float targetArmSpanNorm  = 1.75f;
         const float targetLegSpreadNorm = 0.85f;
-        const float targetArmLiftNorm = 0.85f;
-
-        float armBasedHorizontal = SafeRatio(targetArmSpanNorm, armSpanNorm);
+        float armBasedHorizontal = SafeRatio(targetArmSpanNorm,  armSpanNorm);
         float legBasedHorizontal = SafeRatio(targetLegSpreadNorm, legSpreadNorm);
-
         horizontalMotionGain = Mathf.Clamp((armBasedHorizontal + legBasedHorizontal) * 0.5f, 0.5f, 3.0f);
+
+        // --- Vertical gain (unchanged) ---
+        float armLiftNorm = SafeRatio(
+            armsUpOpenLegs.ShoulderCenterY - armsUpOpenLegs.WristCenterY,
+            armsUpOpenLegs.TorsoHeight);
+        const float targetArmLiftNorm = 0.85f;
         verticalMotionGain = Mathf.Clamp(SafeRatio(targetArmLiftNorm, armLiftNorm), 0.5f, 3.0f);
+
+        // --- Depth (Z) gain — new ---
+        // Physical arm length is the same whether extending sideways (T-pose) or
+        // forward (arms-forward pose).  We want equal avatar-space magnitude for
+        // both, so we equate the two contributions:
+        //
+        //   relativeX (full arm side)    = (armLen_px / torsoHeight) * horizontalMotionGain
+        //   relativeZ (full arm forward) = armForwardZ * depthScale  * depthMotionGain
+        //
+        // Setting relativeZ = relativeX and solving for depthMotionGain:
+        //   depthMotionGain = (armLen_px / torsoHeight * horizontalMotionGain)
+        //                     / (armForwardZ * depthScale)
+        //
+        // armForwardZ = BodyDepthCenter − WristCenterZ
+        //   (positive when wrists are in front of the body; MediaPipe z is
+        //    more negative the closer a point is to the camera)
+        float armLengthPixels = tPoseClosed.WristDistance * 0.5f;
+        float armLengthNorm   = SafeRatio(armLengthPixels, tPoseClosed.TorsoHeight);
+        float armForwardZ     = armsForward.BodyDepthCenter - armsForward.WristCenterZ;
+
+        if (armForwardZ > 0.0001f)
+        {
+            float targetRelativeX = armLengthNorm * horizontalMotionGain;
+            depthMotionGain = Mathf.Clamp(
+                SafeRatio(targetRelativeX, armForwardZ * depthScale),
+                0.5f, 10.0f
+            );
+        }
+        else
+        {
+            Debug.LogWarning(
+                "MiniRig Z calibration: arms-forward pose did not produce a usable depth signal " +
+                "(armForwardZ = " + armForwardZ.ToString("F4") + "). depthMotionGain unchanged."
+            );
+        }
 
         calibrationRunning = false;
         calibrationComplete = true;
+        autoCalibrationMode = false;
         calibrationStage = -1;
+        calibrationCountdownRemaining = 0.0f;
+        countdownLastTick = -1;
+
+        PlayPhaseTone();
 
         Debug.Log(
             "MiniRig calibration complete. Gains -> " +
@@ -307,6 +496,14 @@ public class MiniRigVisualizer : MonoBehaviour
         Vector2 leftAnkle = new Vector2(j.left_ankle.x, j.left_ankle.y);
         Vector2 rightAnkle = new Vector2(j.right_ankle.x, j.right_ankle.y);
 
+        // Depth centre of the torso (average z of shoulders + hips).
+        // MediaPipe z is in the same normalised scale as landmark.x (not pixel-scaled),
+        // and is negative when a point is closer to the camera.
+        float bodyDepthCenter = (
+            j.left_shoulder.z + j.right_shoulder.z +
+            j.left_hip.z      + j.right_hip.z
+        ) * 0.25f;
+
         return new CalibrationSnapshot
         {
             TorsoHeight = torsoHeight,
@@ -319,6 +516,8 @@ public class MiniRigVisualizer : MonoBehaviour
             LeftShoulderY = leftShoulder.y,
             RightShoulderY = rightShoulder.y,
             NoseY = j.nose != null ? j.nose.y : shoulderCenter.y,
+            BodyDepthCenter = bodyDepthCenter,
+            WristCenterZ = (j.left_wrist.z + j.right_wrist.z) * 0.5f,
         };
     }
 
@@ -333,14 +532,25 @@ public class MiniRigVisualizer : MonoBehaviour
 
         switch (stage)
         {
-            case 0:
+            case 0: // arms & legs closed
                 return wristSpanNorm < 0.65f && ankleSpanNorm < 0.35f;
-            case 1:
+
+            case 1: // arms straight forward, legs closed
+                // In 2D the wrists appear near shoulder height (not at sides or above).
+                // They must also be clearly in front of the body in z.
+                return wristsShoulderYOffset < 0.30f
+                    && ankleSpanNorm < 0.45f
+                    && (s.BodyDepthCenter - s.WristCenterZ) > 0.02f;
+
+            case 2: // T-pose, legs closed (was case 1)
                 return wristSpanNorm > 1.30f && ankleSpanNorm < 0.45f && wristsShoulderYOffset < 0.35f;
-            case 2:
+
+            case 3: // T-pose, legs open (was case 2)
                 return wristSpanNorm > 1.30f && ankleSpanNorm > 0.60f && wristsShoulderYOffset < 0.35f;
-            case 3:
+
+            case 4: // arms up, legs open (was case 3)
                 return ankleSpanNorm > 0.60f && wristsAboveShoulders > 0.55f && s.WristCenterY < s.NoseY;
+
             default:
                 return false;
         }
@@ -368,18 +578,33 @@ public class MiniRigVisualizer : MonoBehaviour
 
         if (calibrationRunning && calibrationStage >= 0 && calibrationStage < CalibrationPoseNames.Length)
         {
+            int countdownValue = Mathf.Max(1, Mathf.CeilToInt(calibrationCountdownRemaining));
+            string countdownText = calibrationCountdownRemaining > 0.0f ? countdownValue.ToString() : "GO";
+
             header = "CALIBRATION RUNNING";
-            body = CalibrationPoseNames[calibrationStage] +
-                   "  Capture: " + capturePoseKey + " / " + alternateCapturePoseKey +
-                   "   Reset: " + resetCalibrationKey;
+
+            if (autoCalibrationMode)
+            {
+                body = CalibrationPoseNames[calibrationStage] +
+                       "  AUTO countdown: " + countdownText;
+            }
+            else
+            {
+                body = CalibrationPoseNames[calibrationStage] +
+                       "  Capture: " + capturePoseKey + " / " + alternateCapturePoseKey +
+                       "   Press " + startCalibrationKey + " again for AUTO 5..GO.";
+            }
+
             stageColor = GetCalibrationStageColor(calibrationStage);
-            badge = "STEP " + (calibrationStage + 1) + " / " + CalibrationPoseCount;
+            badge = autoCalibrationMode
+                ? "STEP " + (calibrationStage + 1) + " / " + CalibrationPoseCount + "  |  AUTO " + countdownText
+                : "STEP " + (calibrationStage + 1) + " / " + CalibrationPoseCount + "  |  MANUAL";
         }
         else if (!calibrationComplete)
         {
             header = "CALIBRATION PENDING";
-            body = "Press " + startCalibrationKey + " to start 4-step calibration. Capture each pose with " +
-                   capturePoseKey + " or " + alternateCapturePoseKey + ".";
+            body = "Press " + startCalibrationKey + " to start MANUAL calibration. During calibration, press " +
+                   startCalibrationKey + " again to switch to AUTO countdown.";
             stageColor = new Color(1.0f, 0.64f, 0.0f, 0.95f);
             badge = "READY";
         }
@@ -389,7 +614,7 @@ public class MiniRigVisualizer : MonoBehaviour
             body = "Gains  X=" + horizontalMotionGain.ToString("F2") +
                    "  Y=" + verticalMotionGain.ToString("F2") +
                    "  Z=" + depthMotionGain.ToString("F2") +
-                   "   Press " + resetCalibrationKey + " to recalibrate.";
+                   "   Press " + startCalibrationKey + " to recalibrate.";
             stageColor = new Color(0.17f, 0.75f, 0.27f, 0.95f);
             badge = "LOCKED";
         }
@@ -447,13 +672,15 @@ public class MiniRigVisualizer : MonoBehaviour
         switch (stage)
         {
             case 0:
-                return new Color(0.94f, 0.35f, 0.13f, 0.95f); // closed pose
+                return new Color(0.94f, 0.35f, 0.13f, 0.95f); // closed pose      — orange
             case 1:
-                return new Color(0.95f, 0.72f, 0.12f, 0.95f); // T-pose
+                return new Color(0.10f, 0.90f, 0.75f, 0.95f); // arms forward (Z) — teal
             case 2:
-                return new Color(0.20f, 0.78f, 0.93f, 0.95f); // wide legs
+                return new Color(0.95f, 0.72f, 0.12f, 0.95f); // T-pose closed    — yellow
             case 3:
-                return new Color(0.67f, 0.42f, 0.93f, 0.95f); // arms up
+                return new Color(0.20f, 0.78f, 0.93f, 0.95f); // T-pose open      — cyan/blue
+            case 4:
+                return new Color(0.67f, 0.42f, 0.93f, 0.95f); // arms up          — purple
             default:
                 return new Color(0.75f, 0.75f, 0.75f, 0.95f);
         }
@@ -465,6 +692,58 @@ public class MiniRigVisualizer : MonoBehaviour
         GUI.color = color;
         GUI.DrawTexture(rect, Texture2D.whiteTexture);
         GUI.color = previous;
+    }
+
+    private void EnsureCalibrationAudioSource()
+    {
+        if (calibrationAudioSource != null)
+        {
+            return;
+        }
+
+        calibrationAudioSource = GetComponent<AudioSource>();
+
+        if (calibrationAudioSource == null)
+        {
+            calibrationAudioSource = gameObject.AddComponent<AudioSource>();
+        }
+
+        calibrationAudioSource.playOnAwake = false;
+        calibrationAudioSource.spatialBlend = 0.0f;
+    }
+
+    private void PlayCountdownTone()
+    {
+        PlayTone(countdownToneHz, toneDurationSeconds, toneVolume);
+    }
+
+    private void PlayPhaseTone()
+    {
+        PlayTone(phaseToneHz, toneDurationSeconds * 1.2f, Mathf.Clamp01(toneVolume + 0.05f));
+    }
+
+    private void PlayTone(float frequencyHz, float durationSeconds, float volume)
+    {
+        if (!enableCalibrationSound || !Application.isPlaying)
+        {
+            return;
+        }
+
+        EnsureCalibrationAudioSource();
+
+        int sampleRate = AudioSettings.outputSampleRate > 0 ? AudioSettings.outputSampleRate : 44100;
+        int sampleCount = Mathf.Max(1, Mathf.CeilToInt(sampleRate * durationSeconds));
+        float[] data = new float[sampleCount];
+
+        for (int i = 0; i < sampleCount; i++)
+        {
+            float t = i / (float)sampleRate;
+            data[i] = Mathf.Sin(2.0f * Mathf.PI * frequencyHz * t) * volume;
+        }
+
+        AudioClip clip = AudioClip.Create("calibration_tone", sampleCount, 1, sampleRate, false);
+        clip.SetData(data, 0);
+        calibrationAudioSource.PlayOneShot(clip);
     }
 
     private void EnsureRig()
@@ -497,6 +776,7 @@ public class MiniRigVisualizer : MonoBehaviour
             if (jointRenderer != null)
             {
                 jointRenderer.sharedMaterial = jointMaterial;
+                jointRenderer.enabled = showSkeleton;
             }
 
             jointTransforms[jointName] = jointTransform;
@@ -526,6 +806,7 @@ public class MiniRigVisualizer : MonoBehaviour
             if (boneRenderer != null)
             {
                 boneRenderer.sharedMaterial = boneMaterial;
+                boneRenderer.enabled = showSkeleton;
             }
 
             boneVisuals.Add(new BoneVisual
@@ -719,6 +1000,12 @@ public class MiniRigVisualizer : MonoBehaviour
         }
     }
 
+    public Transform GetJointTransform(string jointName)
+    {
+        Transform jointTransform;
+        return jointTransforms.TryGetValue(jointName, out jointTransform) ? jointTransform : null;
+    }
+
     private static void SafeDestroy(Object obj)
     {
         if (Application.isPlaying)
@@ -764,5 +1051,10 @@ public class MiniRigVisualizer : MonoBehaviour
         public float LeftShoulderY;
         public float RightShoulderY;
         public float NoseY;
+        // Depth fields used for Z-gain calibration (pose 2: arms forward).
+        // MediaPipe z is in normalised units (same scale as landmark.x, NOT pixel-scaled).
+        // More negative = closer to camera.
+        public float BodyDepthCenter; // average z of shoulders + hips
+        public float WristCenterZ;    // average z of left + right wrist
     }
 }

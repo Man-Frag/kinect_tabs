@@ -101,15 +101,16 @@ def _ensure_bones(payload):
                 player["bones"] = _build_bones_from_joints(joints)
 
 
-def save_recording(path, packets):
+def save_recording(path, packets, events=None):
     recording_path = Path(path)
     recording_path.parent.mkdir(parents=True, exist_ok=True)
 
     payload = {
-        "version": 1,
+        "version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "frame_count": len(packets),
         "frames": packets,
+        "events": events or [],
     }
 
     recording_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -140,6 +141,10 @@ def load_recording(path):
 
     if "frames" not in payload or not isinstance(payload["frames"], list):
         raise ValueError(f"Invalid recording file: {recording_path}")
+
+    # Backwards compatible: v1 files have no events field.
+    if "events" not in payload:
+        payload["events"] = []
 
     _ensure_bones(payload)
 

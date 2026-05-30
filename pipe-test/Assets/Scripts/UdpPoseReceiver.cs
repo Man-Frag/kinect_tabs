@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -89,6 +90,20 @@ public class BoneVector
     public float confidence;
 }
 
+/// <summary>
+/// A keystroke event sent by the Python pipeline.
+/// Shape: {"type":"key","timestamp_ms":...,"event":"keydown","key":"c"}
+/// </summary>
+[Serializable]
+public class KeyPacket
+{
+    public string type;
+    public long timestamp_ms;
+    // "event" is a C# keyword; @event maps to the JSON field "event".
+    public string @event;
+    public string key;
+}
+
 public class UdpPoseReceiver : MonoBehaviour
 {
     public int port = 5052;
@@ -100,8 +115,23 @@ public class UdpPoseReceiver : MonoBehaviour
     private readonly object packetLock = new object();
     private PosePacket latestPacket;
 
+    private readonly object keyEventLock = new object();
+    private readonly Queue<KeyPacket> pendingKeyEvents = new Queue<KeyPacket>();
+
+    // Minimal struct used only to detect the packet type before full parsing.
+    [Serializable]
+    private class PacketType
+    {
+        public string type;
+    }
+
     private void Start()
     {
+        // Keep Unity ticking even when the window loses focus so that UDP
+        // packets sent from the Python window (which must be in the foreground
+        // to capture key presses) are processed by Update() loops.
+        Application.runInBackground = true;
+
         udpClient = new UdpClient(port);
         running = true;
 
@@ -124,17 +154,57 @@ public class UdpPoseReceiver : MonoBehaviour
             {
                 byte[] data = udpClient.Receive(ref remoteEndPoint);
                 string json = Encoding.UTF8.GetString(data);
-                PosePacket packet = JsonUtility.FromJson<PosePacket>(json);
 
-                lock (packetLock)
+                // Probe the "type" field first so key packets never clobber
+                // latestPacket, and pose packets never pollute the key queue.
+                PacketType typeProbe = JsonUtility.FromJson<PacketType>(json);
+
+                if (typeProbe != null && typeProbe.type == "key")
                 {
-                    latestPacket = packet;
+                    KeyPacket keyPacket = JsonUtility.FromJson<KeyPacket>(json);
+
+                    if (keyPacket != null && !string.IsNullOrEmpty(keyPacket.key))
+                    {
+                        lock (keyEventLock)
+                        {
+                            pendingKeyEvents.Enqueue(keyPacket);
+                        }
+                    }
+                }
+                else
+                {
+                    PosePacket packet = JsonUtility.FromJson<PosePacket>(json);
+
+                    lock (packetLock)
+                    {
+                        latestPacket = packet;
+                    }
                 }
             }
             catch
             {
                 // Ignore socket closure and malformed packet errors.
             }
+        }
+    }
+
+    /// <summary>
+    /// Dequeues the next pending key event (thread-safe, main-thread drain).
+    /// Returns true and writes to <paramref name="keyEvent"/> if one was
+    /// available; returns false when the queue is empty.
+    /// </summary>
+    public bool TryDequeueKeyEvent(out KeyPacket keyEvent)
+    {
+        lock (keyEventLock)
+        {
+            if (pendingKeyEvents.Count > 0)
+            {
+                keyEvent = pendingKeyEvents.Dequeue();
+                return true;
+            }
+
+            keyEvent = null;
+            return false;
         }
     }
 

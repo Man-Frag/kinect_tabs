@@ -57,6 +57,12 @@ public static class PipeTestSceneSetup
         }
 
         rig.receiver = receiver;
+        rig.showSkeleton = true;
+
+        if (DisableTabsUnitProxyModel())
+        {
+            createdSomething = true;
+        }
 
         Camera camera = Camera.main;
 
@@ -99,6 +105,26 @@ public static class PipeTestSceneSetup
         {
             Debug.Log("Pipe Test: Mini rig scene objects already exist.");
         }
+    }
+
+    private static bool DisableTabsUnitProxyModel()
+    {
+        const string modelRootName = "TabsUnitPlayer";
+        GameObject existing = GameObject.Find(modelRootName);
+
+        if (existing == null)
+        {
+            return false;
+        }
+
+        if (existing.activeSelf)
+        {
+            existing.SetActive(false);
+            Debug.Log("Pipe Test: Disabled TabsUnitPlayer. Using pipe skeleton renderer.");
+            return true;
+        }
+
+        return false;
     }
 }
 #endif
