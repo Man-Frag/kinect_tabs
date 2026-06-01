@@ -89,6 +89,12 @@ public class MiniRigVisualizer : MonoBehaviour
     private const int CalibrationPoseCount = 5;
     private readonly CalibrationSnapshot[] calibrationSnapshots = new CalibrationSnapshot[CalibrationPoseCount];
 
+    // PlayerPrefs keys for persisting calibration gains across sessions.
+    private const string PrefKey_HasCalib = "MiniRig_HasCalib";
+    private const string PrefKey_HGain    = "MiniRig_HGain";
+    private const string PrefKey_VGain    = "MiniRig_VGain";
+    private const string PrefKey_ZGain    = "MiniRig_ZGain";
+
     private bool calibrationComplete;
     private bool calibrationRunning;
     private bool autoCalibrationMode;
@@ -114,6 +120,13 @@ public class MiniRigVisualizer : MonoBehaviour
         BuildDefaultPose();
         EnsureRig();
         ApplyDefaultPose();
+    }
+
+    // Start() is only called in Play mode (even with [ExecuteAlways]), so it's
+    // the right place to restore persisted calibration without affecting the editor.
+    private void Start()
+    {
+        LoadSavedCalibration();
     }
 
     private void OnValidate()
@@ -459,9 +472,55 @@ public class MiniRigVisualizer : MonoBehaviour
         countdownLastTick = -1;
 
         PlayPhaseTone();
+        SaveCalibration();
 
         Debug.Log(
             "MiniRig calibration complete. Gains -> " +
+            "X: " + horizontalMotionGain.ToString("F2") +
+            ", Y: " + verticalMotionGain.ToString("F2") +
+            ", Z: " + depthMotionGain.ToString("F2")
+        );
+    }
+
+    /// <summary>Persists the three motion-gain values to PlayerPrefs.</summary>
+    private void SaveCalibration()
+    {
+        PlayerPrefs.SetInt(PrefKey_HasCalib, 1);
+        PlayerPrefs.SetFloat(PrefKey_HGain, horizontalMotionGain);
+        PlayerPrefs.SetFloat(PrefKey_VGain, verticalMotionGain);
+        PlayerPrefs.SetFloat(PrefKey_ZGain, depthMotionGain);
+        PlayerPrefs.Save();   // flush to disk immediately
+
+        Debug.Log(
+            "MiniRig: calibration saved. Gains -> " +
+            "X: " + horizontalMotionGain.ToString("F2") +
+            ", Y: " + verticalMotionGain.ToString("F2") +
+            ", Z: " + depthMotionGain.ToString("F2")
+        );
+    }
+
+    /// <summary>
+    /// Restores previously saved calibration gains from PlayerPrefs.
+    /// Called from Start() so it only runs in Play mode.
+    /// If no saved data exists, or useCalibration is off, does nothing.
+    /// </summary>
+    private void LoadSavedCalibration()
+    {
+        if (!useCalibration)
+            return;
+
+        if (PlayerPrefs.GetInt(PrefKey_HasCalib, 0) != 1)
+            return;
+
+        horizontalMotionGain = PlayerPrefs.GetFloat(PrefKey_HGain, horizontalMotionGain);
+        verticalMotionGain   = PlayerPrefs.GetFloat(PrefKey_VGain, verticalMotionGain);
+        depthMotionGain      = PlayerPrefs.GetFloat(PrefKey_ZGain, depthMotionGain);
+
+        calibrationComplete = true;
+        calibrationRunning  = false;
+
+        Debug.Log(
+            "MiniRig: loaded saved calibration. Gains -> " +
             "X: " + horizontalMotionGain.ToString("F2") +
             ", Y: " + verticalMotionGain.ToString("F2") +
             ", Z: " + depthMotionGain.ToString("F2")
@@ -1005,6 +1064,17 @@ public class MiniRigVisualizer : MonoBehaviour
         Transform jointTransform;
         return jointTransforms.TryGetValue(jointName, out jointTransform) ? jointTransform : null;
     }
+
+    /// <summary>
+    /// True while a calibration sequence is actively running in Play mode.
+    /// Read by <see cref="TabsUnitRigDriver"/> to display the reference pose.
+    /// </summary>
+    public bool IsCalibrating  => calibrationRunning && Application.isPlaying;
+
+    /// <summary>
+    /// Current calibration step index (0–4), or –1 when not running.
+    /// </summary>
+    public int  CalibrationStep => calibrationStage;
 
     private static void SafeDestroy(Object obj)
     {

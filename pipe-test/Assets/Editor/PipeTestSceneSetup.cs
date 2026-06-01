@@ -12,7 +12,9 @@ public static class PipeTestSceneSetup
         EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChangedInEditMode;
     }
 
-    private static void OnActiveSceneChangedInEditMode(UnityEngine.SceneManagement.Scene oldScene, UnityEngine.SceneManagement.Scene newScene)
+    private static void OnActiveSceneChangedInEditMode(
+        UnityEngine.SceneManagement.Scene _,
+        UnityEngine.SceneManagement.Scene __)
     {
         TryAutoCreateInEditMode();
     }
@@ -20,111 +22,185 @@ public static class PipeTestSceneSetup
     private static void TryAutoCreateInEditMode()
     {
         if (EditorApplication.isPlayingOrWillChangePlaymode)
-        {
             return;
-        }
 
-        CreateMiniRigSceneObjectsInternal(logIfUnchanged: false);
+        CreateSceneObjectsInternal(logIfUnchanged: false);
     }
 
+    [MenuItem("Tools/Pipe Test/Setup Scene")]
+    public static void SetupScene()
+    {
+        CreateSceneObjectsInternal(logIfUnchanged: true);
+    }
+
+    // Keep the old menu entry pointing at the same implementation so
+    // existing muscle memory still works.
     [MenuItem("Tools/Pipe Test/Create Mini Rig Scene Objects")]
     public static void CreateMiniRigSceneObjects()
     {
-        CreateMiniRigSceneObjectsInternal(logIfUnchanged: true);
+        CreateSceneObjectsInternal(logIfUnchanged: true);
     }
 
-    private static void CreateMiniRigSceneObjectsInternal(bool logIfUnchanged)
+    // -------------------------------------------------------------------------
+
+    private static void CreateSceneObjectsInternal(bool logIfUnchanged)
     {
-        bool createdSomething = false;
+        bool changed = false;
 
+        // ---- Pose Receiver ----
         UdpPoseReceiver receiver = Object.FindFirstObjectByType<UdpPoseReceiver>();
-
         if (receiver == null)
         {
-            GameObject receiverObject = new GameObject("PoseReceiver");
-            receiver = receiverObject.AddComponent<UdpPoseReceiver>();
+            GameObject go = new GameObject("PoseReceiver");
+            receiver = go.AddComponent<UdpPoseReceiver>();
             receiver.port = 5052;
-            createdSomething = true;
+            changed = true;
         }
 
+        // ---- MiniRig (calibration + coordinate conversion; may be invisible) ----
         MiniRigVisualizer rig = Object.FindFirstObjectByType<MiniRigVisualizer>();
-
         if (rig == null)
         {
-            GameObject rigObject = new GameObject("MiniRig");
-            rig = rigObject.AddComponent<MiniRigVisualizer>();
-            createdSomething = true;
+            GameObject go = new GameObject("MiniRig");
+            rig = go.AddComponent<MiniRigVisualizer>();
+            changed = true;
         }
-
         rig.receiver = receiver;
-        rig.showSkeleton = true;
 
-        if (DisableTabsUnitProxyModel())
+        // ---- TABS Unit Player ----
+        bool tabsReady = SetupTabsUnitPlayer(receiver, rig, ref changed);
+
+        // Hide the wire skeleton when the model is driving visuals; show it
+        // for debugging when the model isn't available yet.
+        bool wantSkeleton = !tabsReady;
+        if (rig.showSkeleton != wantSkeleton)
         {
-            createdSomething = true;
+            rig.showSkeleton = wantSkeleton;
+            changed = true;
         }
 
+        // ---- Camera ----
         Camera camera = Camera.main;
-
         if (camera == null)
         {
-            GameObject cameraObject = new GameObject("Main Camera");
-            cameraObject.tag = "MainCamera";
-            camera = cameraObject.AddComponent<Camera>();
-            cameraObject.AddComponent<AudioListener>();
-            createdSomething = true;
+            GameObject go = new GameObject("Main Camera");
+            go.tag = "MainCamera";
+            camera = go.AddComponent<Camera>();
+            go.AddComponent<AudioListener>();
+            changed = true;
         }
-
         camera.transform.position = new Vector3(0.0f, 1.45f, 4.0f);
         camera.transform.rotation = Quaternion.Euler(7.0f, 180.0f, 0.0f);
 
+        // ---- Directional Light ----
         Light directional = Object.FindFirstObjectByType<Light>();
-
         if (directional == null)
         {
-            GameObject lightObject = new GameObject("Directional Light");
-            directional = lightObject.AddComponent<Light>();
+            GameObject go = new GameObject("Directional Light");
+            directional = go.AddComponent<Light>();
             directional.type = LightType.Directional;
-            createdSomething = true;
+            changed = true;
         }
-
         directional.intensity = 1.6f;
         directional.transform.rotation = Quaternion.Euler(50.0f, -30.0f, 0.0f);
 
-        if (SceneView.lastActiveSceneView != null)
-        {
-            SceneView.lastActiveSceneView.FrameSelected();
-        }
-
-        if (createdSomething)
+        if (changed)
         {
             EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
-            Debug.Log("Pipe Test: Mini rig scene objects created for edit mode visibility.");
+            string msg = tabsReady
+                ? "Pipe Test: scene set up with TabsUnit model."
+                : "Pipe Test: scene set up (wire skeleton). " +
+                  "Copy Tabs_unit.fbx to Assets/Models and re-run Setup Scene " +
+                  "to add the model.";
+            Debug.Log(msg);
         }
         else if (logIfUnchanged)
         {
-            Debug.Log("Pipe Test: Mini rig scene objects already exist.");
+            Debug.Log("Pipe Test: scene is already up to date.");
         }
     }
 
-    private static bool DisableTabsUnitProxyModel()
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Finds or creates the "TabsUnitPlayer" GameObject from the imported
+    /// <c>Tabs_unit.fbx</c>, attaches <see cref="TabsUnitRigDriver"/>, and
+    /// wires up its references.
+    /// </summary>
+    /// <returns>
+    /// <c>true</c> when the player is present and correctly wired up.
+    /// </returns>
+    private static bool SetupTabsUnitPlayer(
+        UdpPoseReceiver receiver,
+        MiniRigVisualizer rig,
+        ref bool changed)
     {
-        const string modelRootName = "TabsUnitPlayer";
-        GameObject existing = GameObject.Find(modelRootName);
+        const string playerName = "TabsUnitPlayer";
+        const string fbxPath    = "Assets/Models/Tabs_unit.fbx";
 
-        if (existing == null)
+        GameObject playerObject = GameObject.Find(playerName);
+
+        if (playerObject == null)
         {
-            return false;
+            // Try to load the imported FBX asset.
+            GameObject modelAsset = AssetDatabase.LoadAssetAtPath<GameObject>(fbxPath);
+            if (modelAsset == null)
+            {
+                // Not imported yet — caller will fall back to skeleton mode.
+                return false;
+            }
+
+            // Instantiate as a prefab (keeps the link to the source asset).
+            playerObject = PrefabUtility.InstantiatePrefab(modelAsset) as GameObject;
+            if (playerObject == null)
+                playerObject = Object.Instantiate(modelAsset);
+
+            playerObject.name = playerName;
+            changed = true;
         }
 
-        if (existing.activeSelf)
+        if (!playerObject.activeSelf)
         {
-            existing.SetActive(false);
-            Debug.Log("Pipe Test: Disabled TabsUnitPlayer. Using pipe skeleton renderer.");
-            return true;
+            playerObject.SetActive(true);
+            changed = true;
         }
 
-        return false;
+        // Remove the old pose proxy if it's still on the object; TabsUnitRigDriver
+        // supersedes it (handles both root motion and bone driving).
+        TabsUnitPoseProxy proxy = playerObject.GetComponent<TabsUnitPoseProxy>();
+        if (proxy != null)
+        {
+            Object.DestroyImmediate(proxy);
+            changed = true;
+        }
+
+        // Ensure TabsUnitRigDriver is on the root of the player object.
+        TabsUnitRigDriver driver = playerObject.GetComponent<TabsUnitRigDriver>();
+        if (driver == null)
+        {
+            driver = playerObject.AddComponent<TabsUnitRigDriver>();
+            changed = true;
+        }
+
+        if (driver.receiver != receiver) { driver.receiver = receiver; changed = true; }
+        if (driver.miniRig  != rig)      { driver.miniRig  = rig;      changed = true; }
+
+        // Sanity-check: the mixamorig:Spine bone must be findable in the hierarchy.
+        // (Generic rig — no HumanBodyBones mapping needed.)
+        bool spineFound = false;
+        foreach (Transform t in playerObject.GetComponentsInChildren<Transform>())
+        {
+            if (t.name == "mixamorig:Spine") { spineFound = true; break; }
+        }
+        if (!spineFound)
+        {
+            Debug.LogWarning(
+                "Pipe Test: 'mixamorig:Spine' not found under TabsUnitPlayer. " +
+                "Check that Tabs_unit.fbx imported correctly " +
+                "(right-click it in the Project window → Reimport).", playerObject);
+        }
+
+        return true;
     }
 }
 #endif
